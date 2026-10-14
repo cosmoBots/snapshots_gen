@@ -1,0 +1,24 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Verifies a legacy snapshot package (ZIP or directory) against
+# docs/legacy-snapshot-format.md. Exits 0 when the package is valid.
+
+require_relative '../exporter/legacy_snapshot_format'
+
+if ARGV.length != 1
+  warn 'usage: verify-legacy-snapshot PACKAGE'
+  exit 2
+end
+
+result = SnapshotsGen::LegacySnapshot::Verifier.new(ARGV.first).verify
+if result.ok?
+  content = result.manifest.fetch('content')
+  rows = content.fetch('tables').sum { |table| table.fetch('rows') }
+  puts "valid: #{content.fetch('tables').length} tables, #{rows} rows, " \
+       "#{content.fetch('assets').fetch('count')} assets, captured at #{content.fetch('captured_at')}"
+else
+  result.errors.each { |error| warn "error: #{error}" }
+  warn "invalid: #{result.errors.length} errors"
+  exit 1
+end

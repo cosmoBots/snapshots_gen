@@ -1,0 +1,5 @@
+# Packages and working copies hold client data and password hashes: never commit them.
+*.cslegacy
+*.csys
+/work/
+/packages/
