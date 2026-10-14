@@ -49,7 +49,7 @@ for file in "$out"/*.csys "$out"/*.cshistory; do docker cp "$file" "$container:/
 docker exec -u 0 "$container" chown -R redmine:redmine /tmp/sg
 
 runner() {
-  docker exec "$container" bash -c "cd /usr/src/redmine && bundle exec rails runner /tmp/sg/importer/import.rb $*" </dev/null 2>&1 |
+  docker exec -u redmine "$container" bash -c "cd /usr/src/redmine && bundle exec rails runner /tmp/sg/importer/import.rb $*" </dev/null 2>&1 |
     grep -v ' INFO -- \| WARN -- '
 }
 history="/tmp/sg/pkg/$(basename "$(ls "$out"/*.cshistory)")"

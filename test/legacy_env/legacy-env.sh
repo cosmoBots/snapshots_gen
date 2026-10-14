@@ -13,6 +13,8 @@
 #   legacy-env.sh run NAME COMMAND...      run a command in instance NAME
 #   legacy-env.sh runner NAME SCRIPT ARGS  rails runner in instance NAME
 #   legacy-env.sh sql NAME 'SQL'           query database csys_NAME
+#   legacy-env.sh start NAME               keep instance NAME running as container sg-legacy-NAME
+#   legacy-env.sh stop NAME                remove that container
 #   legacy-env.sh down                     remove containers (volumes stay)
 #
 # Instances live in $SG_WORK/legacy/NAME/app (the Redmine tree with plugins).
@@ -65,7 +67,7 @@ run_in() {
   write_database_yml "$name"
   docker run --rm -i --network "$network" \
     -v "$dir:/usr/src/redmine" -v "$dir/files:/usr/src/redmine/files" \
-    -v sg-legacy-bundle:/usr/local/bundle \
+    -v "sg-legacy-bundle-$name:/usr/local/bundle" \
     -v "$SG_WORK:/work" -w /usr/src/redmine -e RAILS_ENV=production \
     --user "$(id -u):$(id -g)" -e HOME=/tmp \
     "$image" "$@"
@@ -129,6 +131,23 @@ case "${1:-}" in
   runner)
     name="$2"; script="$3"; shift 3
     run_in "$name" bundle exec rails runner -e production "$script" "$@"
+    ;;
+  start)
+    # A long-running container, so the procedure's docker cp and docker exec
+    # commands can be rehearsed as on a real old instance.
+    dir="$(app_dir "$2")"
+    write_database_yml "$2"
+    docker rm -f "sg-legacy-$2" >/dev/null 2>&1 || true
+    docker run -d --name "sg-legacy-$2" --network "$network" \
+      -v "$dir:/usr/src/redmine" -v "$dir/files:/usr/src/redmine/files" \
+      -v "sg-legacy-bundle-$2:/usr/local/bundle" -w /usr/src/redmine -e RAILS_ENV=production \
+      --entrypoint sleep "$image" infinity >/dev/null
+    # The tree belongs to the host user: give the image's redmine user that uid.
+    docker exec -u 0 "sg-legacy-$2" usermod -o -u "$(id -u)" redmine
+    echo "sg-legacy-$2"
+    ;;
+  stop)
+    docker rm -f "sg-legacy-$2" >/dev/null 2>&1 || true
     ;;
   down)
     docker rm -f "$mysql" >/dev/null 2>&1 || true

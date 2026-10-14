@@ -10,9 +10,11 @@ The tool has three pieces, each of which knows only one side:
 
 The legacy snapshot format is specified in [docs/legacy-snapshot-format.md](docs/legacy-snapshot-format.md).
 
+The migration procedure, in Spanish, is [docs/procedimiento-migracion.md](docs/procedimiento-migracion.md).
+
 ## Status
 
-Work in progress. The format, its writer and its verifier exist; the pieces are being written.
+The three pieces work end to end on a synthetic old instance and on a copy of a real one: the history of every item reads as in the source. Tags and the conversion of old PORIS models to the `poris` profile come later.
 
 ## Data protection
 
@@ -34,6 +36,8 @@ To check a package:
 ```sh
 bin/verify-legacy-snapshot PACKAGE.cslegacy
 ```
+
+`test/legacy_env/` runs disposable old instances (MySQL 5.7 and Redmine 4.2.10) on a copied or synthetic application tree, `test/legacy_env/synthesize.rb` fills one with invented history, and `test/e2e.sh` runs the whole migration on a disposable new instance.
 
 ## License
 

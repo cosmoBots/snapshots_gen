@@ -90,7 +90,8 @@ module SnapshotsGen
           return
         end
         project = Cosmosys::ProjectSnapshotMaterializer.new(source, user: admin, attributes: attributes).call
-        puts "Imported #{project.identifier} with #{Issue.where(project_id: project.self_and_descendants.select(:id)).count} items."
+        tree = Project.find(project.id).self_and_descendants.pluck(:id)
+        puts "Imported #{project.identifier}: #{tree.length} projects, #{Issue.where(project_id: tree).count} items."
       end
     end
   end
