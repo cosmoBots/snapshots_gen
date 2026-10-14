@@ -229,6 +229,12 @@ travel_to(at(6)) do
   end
 end
 
+travel_to(at(6, 4)) do
+  edit!(@battery, @alice, 'New external code.') do |issue|
+    issue.custom_field_values = { cf('csOldCode').id.to_s => 'OLD-17B' }
+  end
+end
+
 travel_to(at(7)) do
   edit!(@boot, @alice) do |issue|
     issue.fixed_version = @v1

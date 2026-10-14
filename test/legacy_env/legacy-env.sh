@@ -15,6 +15,7 @@
 #   legacy-env.sh sql NAME 'SQL'           query database csys_NAME
 #   legacy-env.sh start NAME               keep instance NAME running as container sg-legacy-NAME
 #   legacy-env.sh stop NAME                remove that container
+#   legacy-env.sh serve NAME ADDRESS PORT  serve instance NAME over HTTP (container sg-legacy-NAME-web)
 #   legacy-env.sh down                     remove containers (volumes stay)
 #
 # Instances live in $SG_WORK/legacy/NAME/app (the Redmine tree with plugins).
@@ -147,7 +148,20 @@ case "${1:-}" in
     echo "sg-legacy-$2"
     ;;
   stop)
-    docker rm -f "sg-legacy-$2" >/dev/null 2>&1 || true
+    docker rm -f "sg-legacy-$2" "sg-legacy-$2-web" >/dev/null 2>&1 || true
+    ;;
+  serve)
+    # The copy never sends mail: Redmine 4.2 reads delivery from configuration.yml.
+    dir="$(app_dir "$2")"
+    write_database_yml "$2"
+    printf 'production:\n  email_delivery:\n    delivery_method: :test\n' > "$dir/config/configuration.yml"
+    docker rm -f "sg-legacy-$2-web" >/dev/null 2>&1 || true
+    docker run -d --name "sg-legacy-$2-web" --restart unless-stopped --network "$network" -p "$3:$4:3000" \
+      -v "$dir:/usr/src/redmine" -v "$dir/files:/usr/src/redmine/files" \
+      -v "sg-legacy-bundle-$2:/usr/local/bundle" -w /usr/src/redmine -e RAILS_ENV=production \
+      --user "$(id -u):$(id -g)" -e HOME=/tmp --entrypoint bundle "$image" \
+      exec rails server -e production -b 0.0.0.0 -p 3000 >/dev/null
+    echo "sg-legacy-$2-web on http://$3:$4"
     ;;
   down)
     docker rm -f "$mysql" >/dev/null 2>&1 || true

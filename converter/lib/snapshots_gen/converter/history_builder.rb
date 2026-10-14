@@ -327,6 +327,9 @@ module SnapshotsGen
             drop(detail, item, 'relation with an AD/RD/CD item, now a catalog reference')
           elsif !@plan.item_for_issue(other)
             drop(detail, item, "relation with item ##{other}, not in the source")
+          elsif %w[blocks blocked].include?(key) && @plan.poris_item?(item) && @plan.poris_item?(@plan.item_for_issue(other))
+            # The relation itself is reversed for cosmosys_poris; its history follows.
+            base.merge('value_ref' => 'items', 'prop_key' => key == 'blocks' ? 'blocked' : 'blocks')
           else
             base.merge('value_ref' => 'items')
           end
@@ -341,9 +344,6 @@ module SnapshotsGen
 
         name = field['name']
         if (native = Rules::NATIVE_ISSUE_FIELDS[name])
-          if Rules::UNLABELLED_NATIVE_FIELDS.include?(native['field'])
-            return drop(detail, item, "#{name} became #{native['field']}, which has no history label")
-          end
           return drop(detail, item, "#{name} on an item that is not a requirement") if native['requirement'] && item.profile != 'requirement'
 
           mapped = lambda do |value|

@@ -176,7 +176,9 @@ module SnapshotsGen
           'status' => item.status,
           'priority' => @plan.enumeration_name(issue['priority_id']),
           'author' => @plan.principal_name(item.author_id),
-          'assigned_to' => @plan.principal_name(issue['assigned_to_id']),
+          # Redmine only accepts members as assignees, and memberships arrive
+          # with the history: the history importer sets the assignee.
+          'assigned_to' => nil,
           'category' => issue['category_id'] && @plan.category(issue['category_id'])&.fetch('name'),
           'fixed_version' => fixed_version && fixed_version['name'],
           'start_date' => issue['start_date'],

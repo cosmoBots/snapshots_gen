@@ -16,7 +16,8 @@ module SnapshotsGen
         'project_code_normalized' => ['transformation', 'Project codes made alphanumeric'],
         'project_code_collision' => ['transformation', 'Project codes renamed because they collided'],
         'project_field_dropped' => ['transformation', 'Project custom fields without a current equivalent'],
-        'identity_renumbered' => ['transformation', 'CSIDs renumbered (moved, colliding or invalid)'],
+        'identity_renumbered' => ['transformation', 'CSIDs renumbered (missing, invalid or repeated in the tree)'],
+        'identity_foreign_prefix_kept' => ['information', 'CSIDs kept with the prefix of another project (moved items)'],
         'identity_prefix_normalized' => ['transformation', 'CSIDs rewritten with the normalized project code'],
         'synthetic_chapter' => ['transformation', 'Chapters generated around items that cannot have children'],
         'document_item_absorbed' => ['transformation', 'AD/RD/CD items turned into documents'],
@@ -33,6 +34,7 @@ module SnapshotsGen
         'position_renumbered' => ['transformation', 'Sibling positions renumbered'],
         'relation_to_document' => ['transformation', 'Relations to AD/RD/CD items turned into catalog references'],
         'relation_dropped' => ['warning', 'Relations whose other end is not migrated'],
+        'poris_relation_reversed' => ['transformation', 'PORIS "blocks" relations reversed (the mode now blocks what it includes), with their history'],
         'relation_cross_package' => ['information', 'Relations between packages, restored by the history importer'],
         'relations_on_close' => ['information', 'Relations kept by erased or zombie requirements'],
         'relations_on_close_unparsed' => ['warning', 'Stored relations of erased requirements that could not be read'],
@@ -54,7 +56,8 @@ module SnapshotsGen
         'role_mapped' => ['information', 'Roles of memberships'],
         'shared_version' => ['information', 'Versions shared with other projects, assigned by the history importer'],
         'source_gap' => ['warning', 'Gaps reported by the exporter'],
-        'unsupported_content' => ['information', 'Content present in the source that this version does not migrate']
+        'unsupported_content' => ['information', 'Content present in the source that this version does not migrate'],
+        'plugin_data_not_migrated' => ['warning', 'Tables of other plugins with data, not migrated']
       }.freeze
 
       attr_reader :entries

@@ -14,14 +14,24 @@ module SnapshotsGen
 
       REQUIREMENT_TRACKER = 'rq'
       # Old tracker name => current tracker key and name.
+      # The old PORIS had three value trackers; the current one has a single
+      # value kind (prValue), the only one a parameter accepts as a child. The
+      # type-specific old fields stay as custom fields.
       TRACKERS = {
         'csInfo' => { 'key' => 'cs_info', 'name' => 'csInfo', 'item_profile' => 'info' },
-        'csRefDoc' => { 'key' => 'cs_ref_doc', 'name' => 'csRefDoc', 'item_profile' => 'doc' }
+        'csRefDoc' => { 'key' => 'cs_ref_doc', 'name' => 'csRefDoc', 'item_profile' => 'doc' },
+        'prValFloat' => { 'key' => 'prValue', 'name' => 'prValue', 'item_profile' => nil },
+        'prValText' => { 'key' => 'prValue', 'name' => 'prValue', 'item_profile' => nil }
       }.freeze
       INFO_TRACKER = TRACKERS.fetch('csInfo')
       REQUIREMENT = { 'key' => 'requirement', 'name' => 'csRq', 'item_profile' => 'requirement' }.freeze
       DATA_SECTION = { 'key' => 'cs_data', 'name' => 'csData', 'item_profile' => 'data_section' }.freeze
       DATUM = { 'key' => 'cs_datum', 'name' => 'csDatum', 'item_profile' => 'datum' }.freeze
+
+      # Trackers of the old PORIS plugin (cosmosys_req_poris_rm). Its "blocks"
+      # relations point from what a mode includes to the mode; cosmosys_poris
+      # points from the mode to what it includes (CosmosysPoris::IssueRelationPatch).
+      PORIS_TRACKERS = %w[prSys prParam prMode prValue prValFloat prValText prCmd].freeze
 
       # Profiles whose items may only hang from an info chapter, and profiles
       # that cannot have children (see Cosmosys::ItemKindRegistry).
@@ -62,9 +72,6 @@ module SnapshotsGen
         'csOldCode' => { 'field' => 'cs_ext_code', 'requirement' => false },
         'csWload' => { 'field' => 'cs_wload', 'requirement' => false }
       }.freeze
-      # Native fields whose history the current cosmoSys cannot label, so
-      # their old journal details are reported instead of written.
-      UNLABELLED_NATIVE_FIELDS = %w[cs_ext_code cs_wload].freeze
 
       DROPPED_ISSUE_FIELDS = {
         'csID' => 'copy of the old internal identifier; the item keeps it as its native CSID',
@@ -85,6 +92,23 @@ module SnapshotsGen
       DOCUMENT_FAMILIES = { 'AD' => 'A', 'RD' => 'R', 'CD' => 'C' }.freeze
 
       CORE_MODULES = %w[issue_tracking time_tracking news documents files wiki repository boards calendar gantt].freeze
+
+      # Tables of Redmine 4.2 and of the old cosmoSys plugins. Any other table
+      # with rows belongs to another plugin, whose data is not migrated yet.
+      REDMINE_TABLES = %w[
+        ar_internal_metadata attachments auth_sources boards changes changeset_parents changesets changesets_issues
+        comments custom_field_enumerations custom_fields custom_fields_projects custom_fields_roles custom_fields_trackers
+        custom_values documents email_addresses enabled_modules enumerations groups_users import_items imports
+        issue_categories issue_relations issue_statuses issues journal_details journals member_roles members messages
+        news open_id_authentication_associations open_id_authentication_nonces projects projects_trackers queries
+        queries_roles repositories roles roles_managed_roles schema_migrations settings time_entries tokens trackers
+        user_preferences users versions watchers wiki_content_versions wiki_contents wiki_pages wiki_redirects wikis
+        workflows
+      ].freeze
+      COSMOSYS_TABLES = %w[
+        cosmosys_issues cosmosys_projects cosmosys_trackers cosmosys_users cosmosys_versions cosmosys_documents
+        cosmosys_project_gits csys_reqs csys_poris
+      ].freeze
 
       # Old serialized YAML (possible_values, format_store). Tagged Ruby
       # objects are read as plain lists or "key: value" lines.

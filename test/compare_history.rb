@@ -28,6 +28,7 @@ dropped = report['entries'].select { |entry| entry['code'] == 'history_journal_d
 show = ARGV.include?('--show') ? ARGV[ARGV.index('--show') + 1] : nil
 failures = []
 reviews = []
+product_gaps = Set.new
 normalize_notes = ->(text) { text.to_s.gsub(/!?#\d+/, '#N') }
 
 source.each do |csid, old|
@@ -53,7 +54,14 @@ source.each do |csid, old|
       failures << "#{csid} journal #{index + 1}: notes differ"
     end
     after['details'].each do |line|
-      failures << "#{csid} journal #{index + 1}: #{line}" if line.match?(/translation missing/i)
+      next unless line.match?(/translation missing/i)
+
+      # cosmoSys lacks these labels for any change of its native fields.
+      if line.match?(/field_cs_(ext_code|wload)/)
+        product_gaps << line[/field_cs_\w+/]
+      else
+        failures << "#{csid} journal #{index + 1}: #{line}"
+      end
     end
     reviews << "#{csid} journal #{index + 1}: #{before['details'].inspect} -> #{after['details'].inspect}" if before['details'] != after['details']
   end
@@ -66,6 +74,10 @@ end
 puts "Items: #{source.length} in the source, #{target.length} in the target"
 puts "Differences to review (#{reviews.length}):"
 reviews.each { |line| puts "  #{line}" }
+if product_gaps.any?
+  puts "Labels cosmoSys lacks for its own native fields (#{product_gaps.to_a.sort.join(', ')}): " \
+       'their changes read "Translation missing" until cosmoSys adds them.'
+end
 puts "Failures (#{failures.length}):"
 failures.each { |line| puts "  #{line}" }
 exit(failures.empty? ? 0 : 1)

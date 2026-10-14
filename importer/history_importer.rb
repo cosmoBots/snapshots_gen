@@ -167,6 +167,13 @@ module SnapshotsGen
 
           existing = User.where('LOWER(login) = ?', login.downcase).first
           if existing
+            # Same person: the history shows the source name; the password
+            # and everything else of the destination account stay.
+            names = { 'firstname' => row['firstname'].to_s, 'lastname' => row['lastname'].to_s }
+            if names.any? { |column, value| existing[column].to_s != value }
+              existing.update_columns(names)
+              say "User #{login} keeps its password and takes the source name #{names.values.join(' ')}"
+            end
             @user_map[row['id']] = existing.id
             @stats['users_matched'] += 1
             next
@@ -771,31 +778,47 @@ module SnapshotsGen
                     Issue.where(id: @item_map.values).where('description LIKE ?', '%#snapshots-gen-item-%').count +
                     WikiContent.where(page_id: @page_map.values).where('text LIKE ?', '%#snapshots-gen-item-%').count
         problems << "#{leftovers} texts still hold reference placeholders" if leftovers.positive?
-        labels = untranslated_history_labels(journals)
+        labels, product_gaps = untranslated_history_labels(journals)
         problems << "history labels without translation: #{labels.join(', ')}" if labels.any?
+        product_gaps.each do |key|
+          say "WARNING: cosmoSys has no history label for the native field #{key}; its changes show " \
+              '"Translation missing" here as in any change made in this instance, until cosmoSys adds the label.'
+        end
+        @stats['unlabelled_native_fields'] = product_gaps.length
         say "Verified #{journals.count} journals and #{details.count} details; #{@dropped.length} records dropped (listed in the report)."
         problems
       end
 
       # Renders every imported detail as Redmine does and looks for labels
-      # that would show "Translation missing".
+      # that would show "Translation missing". A native item column without a
+      # label is a gap of cosmoSys itself (its own edits show it too): it is
+      # returned apart, as a warning.
       def untranslated_history_labels(journals)
         renderer = Object.new
         renderer.extend(Redmine::I18n, ERB::Util, ActionView::Helpers::TagHelper, ActionView::Helpers::OutputSafetyHelper,
                         ApplicationHelper, CustomFieldsHelper, IssuesHelper)
         problems = Set.new
+        gaps = Set.new
+        viewer = User.find_by(admin: true)
         %w[en es].each do |language|
           ::I18n.with_locale(language) do
             journals.includes(:details).find_each do |journal|
-              renderer.details_to_strings(journal.visible_details(User.find_by(admin: true)), true).each do |line|
-                problems << "#{language}:#{line[0, 60]}" if line.to_s.match?(/translation missing/i)
+              journal.visible_details(viewer).each do |detail|
+                line = renderer.details_to_strings([detail], true).join(' ')
+                next unless line.match?(/translation missing/i)
+
+                if detail.property == 'attr' && Issue.column_names.include?(detail.prop_key)
+                  gaps << detail.prop_key
+                else
+                  problems << "#{language}:#{line[0, 60]}"
+                end
               end
             end
           end
         end
-        problems.to_a.sort
+        [problems.to_a.sort, gaps.to_a.sort]
       rescue StandardError => error
-        ["could not render the history: #{error.class}: #{error.message}"]
+        [["could not render the history: #{error.class}: #{error.message}"], []]
       end
     end
   end

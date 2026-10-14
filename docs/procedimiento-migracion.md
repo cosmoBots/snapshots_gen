@@ -9,6 +9,57 @@ Este procedimiento lleva una instancia antigua de cosmoSys (Redmine 4.2 con los 
 - **Lo que no se migra** lo dice el informe de conversión. Entre otras cosas: lo que el cosmoSys antiguo nunca guardó en el historial (los botones de borrar y zombi, mover y reordenar en el árbol, las importaciones ODS y git), las noticias, los foros y los repositorios. Las etiquetas y la conversión de los modelos PORIS llegan en una fase posterior.
 - **Las contraseñas se conservan**: Redmine 4.2 y 7 las guardan igual. **El 2FA se reinicia**: quien lo usaba tiene que volver a activarlo.
 
+## Qué cambia en la conversión
+
+La conversión no reorganiza nada a mano, pero el modelo nuevo nombra algunas cosas de otra forma. Todo lo que cambia queda en el informe de conversión (paso 4).
+
+**Estados:**
+
+| Antes | Después |
+| --- | --- |
+| `rqDraft`, `rqStable`, `rqApproved`, `rqRejected` | `Draft`, `Stable`, `Approved`, `Rejected` |
+| `rqErased` y `rqZombie` | `Erased` |
+| `csNone` | el estado por defecto del tracker |
+| cualquier otro | el mismo nombre |
+
+**Trackers:** `rq` pasa a `csRq`, salvo los ítems con `rqType` `Info`, que pasan a `csInfo`. `csInfo` y `csRefDoc` se quedan igual. Los valores PORIS `prValFloat` y `prValText` pasan a `prValue`, el único tipo de valor del PORIS nuevo. Los demás trackers conservan su nombre.
+
+**Roles de las membresías:** si la instancia nueva tiene un rol con el mismo nombre, se usa ese. Si no:
+
+| Antes | Después |
+| --- | --- |
+| `rqMngr` | `Manager` |
+| `rqWriter` | `Developer` |
+| `rqReviewer` | `Developer` |
+| `rqReader` | `Reporter` |
+
+Para otro reparto, añade `roles=rqReviewer:Reporter,...` a `importar history` (paso 6.3). Un rol sin destino deja sin importar sus membresías, y el paso 6.1 lo avisa.
+
+**Campos de los ítems:**
+
+| Antes | Después |
+| --- | --- |
+| `rqType` (Complex, Opt, Mech, Hw, Sw) | tipo de requisito (complex, optical, mechanical, hardware, software) |
+| `rqLevel`, `rqRationale`, `rqSources` | nivel, justificación y fuentes del requisito |
+| `rqComplanceState`, `rqComplianceJustif` | estado y justificación del cumplimiento |
+| `rqVerif`, `rqVerifDescr` | métodos y descripción de la verificación |
+| `csOldCode`, `csWload` | código externo y carga de trabajo (`csExtCode`, `csWLoad`) |
+| `rqVar` y `rqValue` | un dato de proyecto (`csDatum`) con ese nombre y ese valor, bajo un capítulo "Project data" |
+| `rqAplDocs`, `rqRefDocs`, `rqComplianceDocs` | referencias del catálogo de documentos; el texto que no es una referencia se conserva como campo personalizado |
+| `csID`, `csChapter`, `depGrahInReports` | nada: el CSID y el capítulo son nativos, y la marca de informe no tiene equivalente |
+| cualquier otro campo personalizado | el mismo campo, con su definición |
+
+El historial sigue a los campos: un cambio antiguo de `rqLevel` se ve como cambio del nivel de requisito, con los valores nuevos. Hasta que cosmoSys etiquete `csExtCode` y `csWLoad` en el historial (corrección preparada), sus cambios, también los que se hagan en la instancia nueva, se leen "Translation missing"; el paso 7 lo avisa sin darlo por fallo.
+
+**Estructura:**
+
+- Los ítems `AD n`, `RD n` y `CD n` pasan a ser documentos del proyecto, con su posición en el catálogo. Si el título trae código, versión y fecha, se extraen.
+- Un requisito o un `csRefDoc` con hijos queda dentro de un capítulo generado, "Group: <título>", porque en el modelo nuevo no pueden tener hijos.
+- Los CSID se conservan, también los que tienen el prefijo de otro proyecto porque el ítem se movió. Solo se renumera un ítem sin CSID o con uno repetido en su árbol.
+- En los modelos PORIS, una relación "bloquea" va al revés que antes: el modo bloquea lo que incluye (sus submodos y sus valores). La conversión invierte esas relaciones y sus cambios en el historial.
+
+**Personas:** los usuarios se emparejan por login. Si ya existían en la instancia nueva (como `admin`), conservan su contraseña y toman el nombre de origen. Si no, se crean con su contraseña de siempre. El asignado de cada ítem llega con el historial (paso 6.3), porque Redmine solo deja asignar a miembros del proyecto.
+
 ## Qué hace falta
 
 - En el servidor antiguo: acceso a `docker` y el nombre del contenedor de la instancia (en este documento, `<contenedor-antiguo>`; en el despliegue antiguo suele ser `csys_rm-<nombre>`).
@@ -98,7 +149,7 @@ Deja en `migracion/convertido/`:
 Crea una instancia nueva y vacía con `cosmoSys_deploy`, rama `feat/optional-plugins`, siguiendo su README:
 
 - variante `requirements` si la instancia antigua tenía requisitos (tracker `rq`);
-- el conjunto opcional `poris` si el inventario muestra ítems de los trackers `pr*`;
+- el conjunto opcional `poris` si el inventario muestra ítems de los trackers `pr*`: trae `prSys`, `prParam`, `prMode`, `prValue` y `prCmd`, y la conversión lleva `prValFloat` y `prValText` a `prValue`;
 - un administrador propio (`COSMOSYS_INITIAL_ADMIN_PASSWORD`). Si en la instancia antigua había un usuario `admin`, se empareja con este y se queda con la contraseña nueva.
 
 No la publiques todavía y no dejes entrar a nadie. En el resto del documento, `<contenedor-nuevo>` es su contenedor de Redmine (`<proyecto>-redmine-1`).
@@ -189,7 +240,7 @@ docker run --rm -v "$PWD:/work" snapshots_gen-converter \
   ruby snapshots_gen/test/compare_history.rb migracion/origen.jsonl migracion/destino.jsonl migracion/convertido/report.json
 ```
 
-Tiene que terminar en `Failures (0)`. Antes enseña las diferencias que la conversión hace a propósito (estados y campos renombrados, números de ítem nuevos), para revisarlas. Un fallo nombra el ítem por su CSID y lo que no coincide.
+Tiene que terminar en `Failures (0)`. Antes enseña las diferencias que la conversión hace a propósito (estados y campos renombrados, números de ítem nuevos, relaciones PORIS invertidas), para revisarlas. Un fallo nombra el ítem por su CSID y lo que no coincide. La línea "Labels cosmoSys lacks for its own native fields" no es un fallo de la migración: es la etiqueta de `csExtCode` y `csWLoad` que le falta a cosmoSys (ver "Qué cambia en la conversión").
 
 Por último, entra como administrador y abre dos o tres ítems con historial, la wiki y un proyecto privado con un usuario normal (con su contraseña de siempre).
 

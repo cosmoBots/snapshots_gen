@@ -420,42 +420,57 @@ module SnapshotsGen
         end
       end
 
-      # The pipeline's identity rule: keep a valid old CSID whose prefix is the
-      # project's code and whose number is free; otherwise take the next number.
+      # Identities: an old CSID is kept whenever it is unique within its
+      # project tree, even when its prefix belongs to another project (the item
+      # was moved): cosmoSys only requires uniqueness per tree, and people cite
+      # these identifiers. A prefix that was the project's own code with
+      # characters cosmoSys does not accept is rewritten with the normalized
+      # code. Items without a usable CSID take the next number of their project.
       def plan_identities!
+        used = Hash.new { |hash, key| hash[key] = Set.new }
+        candidates = {}
+        @items.values.reject { |item| item.profile == 'datum' || item.synthetic? }.sort_by(&:source_id).each do |item|
+          identifier = @cosmosys_issues.dig(item.source_id, 'identifier').to_s
+          match = identifier.match(/\A(.+)-(\d+)\z/)
+          next unless match
+
+          raw_code = values('Project', item.project_id)[Rules::PROJECT_CODE_FIELD].to_s
+          prefix = match[1]
+          prefix = project_code(item.project_id) if !raw_code.empty? && prefix.casecmp?(raw_code)
+          csid = "#{prefix}-#{match[2]}"
+          tree = root_of(item.project_id)
+          next unless used[tree].add?(csid.downcase)
+
+          candidates[item.key] = { 'original' => identifier, 'csid' => csid, 'number' => match[2].to_i,
+                                   'own' => prefix.casecmp?(project_code(item.project_id)) }
+        end
         @items.values.reject { |item| item.profile == 'datum' }.group_by(&:project_id).each do |project_id, project_items|
           code = project_code(project_id)
-          raw_code = values('Project', project_id)[Rules::PROJECT_CODE_FIELD].to_s
-          parsed = project_items.to_h do |item|
-            identifier = item.synthetic? ? '' : @cosmosys_issues.dig(item.source_id, 'identifier').to_s
-            match = identifier.match(/\A(.+)-(\d+)\z/)
-            [item.key, match && { 'original' => identifier, 'prefix' => match[1], 'number' => match[2].to_i,
-                                  'width' => match[2].length }]
-          end
-          used = {}
-          maximum = parsed.values.compact.map { |entry| entry['number'] }.max.to_i
-          ordered = project_items.sort_by { |item| [item.synthetic? ? 1 : 0, item.source_id.is_a?(Integer) ? item.source_id : 0, item.key] }
-          ordered.each do |item|
-            entry = parsed[item.key]
-            prefix_ok = entry && [code, raw_code, Rules.normalize_code(raw_code)].any? { |candidate| entry['prefix'].casecmp?(candidate) }
-            if entry && prefix_ok && !used[entry['number']]
-              number = entry['number']
-              width = [entry['width'], 4].max
-            else
-              maximum += 1
-              number = maximum
-              width = 4
+          tree = root_of(project_id)
+          maximum = candidates.values_at(*project_items.map(&:key)).compact.select { |entry| entry['own'] }
+                              .map { |entry| entry['number'] }.max.to_i
+          project_items.sort_by { |item| [item.synthetic? ? 1 : 0, item.source_id.is_a?(Integer) ? item.source_id : 0, item.key] }.each do |item|
+            entry = candidates[item.key]
+            if entry
+              item.csid = entry['csid']
+              item.csidnum = entry['number']
+              if entry['original'] != entry['csid']
+                report.add('identity_prefix_normalized', item.key, from: entry['original'], to: item.csid)
+              elsif !entry['own']
+                report.add('identity_foreign_prefix_kept', item.key, csid: item.csid, project: project_identifier(project_id))
+              end
+              next
             end
-            used[number] = true
-            item.csid = format("%s-%0#{width}d", code, number)
-            item.csidnum = number
+            loop do
+              maximum += 1
+              break if used[tree].add?(format('%s-%04d', code, maximum).downcase)
+            end
+            item.csid = format('%s-%04d', code, maximum)
+            item.csidnum = maximum
             next if item.synthetic?
 
-            if entry.nil? || !prefix_ok || entry['number'] != number
-              report.add('identity_renumbered', item.key, from: entry && entry['original'], to: item.csid)
-            elsif entry['original'] != item.csid
-              report.add('identity_prefix_normalized', item.key, from: entry['original'], to: item.csid)
-            end
+            original = @cosmosys_issues.dig(item.source_id, 'identifier')
+            report.add('identity_renumbered', item.key, from: original, to: item.csid)
           end
         end
       end
@@ -470,6 +485,7 @@ module SnapshotsGen
       def plan_catalog_and_relations!
         @relations = []
         @cross_relations = []
+        @reversed_poris_relations = 0
         entries_by_item = @catalog.to_h { |entry| [entry.source_item_id, entry] }
         text_authority = Set.new
         reference_count = 0
@@ -518,6 +534,10 @@ module SnapshotsGen
           end
           row = { 'from' => from.key, 'to' => to.key, 'type' => relation['relation_type'], 'delay' => relation['delay'],
                   'source_id' => relation['id'] }
+          if poris_reversed?(relation['relation_type'], from, to)
+            row['from'], row['to'] = row['to'], row['from']
+            @reversed_poris_relations += 1
+          end
           if root_of(from.project_id) == root_of(to.project_id)
             @relations << row
           else
@@ -526,6 +546,9 @@ module SnapshotsGen
           end
         end
         report.add('catalog_reference', nil, count: reference_count) if reference_count.positive?
+        if @reversed_poris_relations.positive?
+          report.add('poris_relation_reversed', nil, relations: @reversed_poris_relations)
+        end
         @cosmosys_issues.each_value do |row|
           text = row['relations_on_close'].to_s
           next if text.strip.empty? || text.strip == '[]'
@@ -538,6 +561,20 @@ module SnapshotsGen
           end
         end
       end
+
+      public
+
+      def poris_item?(item)
+        item && !item.synthetic? && Rules::PORIS_TRACKERS.include?(tracker_name(item.issue['tracker_id']))
+      end
+
+      # A "blocks" relation between two old PORIS items is written the other
+      # way round in the current model.
+      def poris_reversed?(type, from, to)
+        type == 'blocks' && poris_item?(from) && poris_item?(to)
+      end
+
+      private
 
       def catalog_entry_for(project_id, family, position)
         @catalog.find { |entry| entry.project_id == project_id && entry.family == family && entry.position == position }
@@ -595,7 +632,8 @@ module SnapshotsGen
 
             if (native = Rules::NATIVE_ISSUE_FIELDS[name])
               if native['requirement'] && item.profile != 'requirement'
-                if name != 'rqType' && !value.to_s.strip.empty?
+                # Redmine fills defaults in every item of the tracker; only real values are a loss.
+                if name != 'rqType' && !value.to_s.strip.empty? && Array(value).map(&:to_s) != [field['default_value'].to_s]
                   report.add('field_dropped', item.key, field: name, reason: 'requirement field on an item that is not a requirement')
                 end
                 next
@@ -732,6 +770,12 @@ module SnapshotsGen
         never << 'moves and reordering in the tree (chapter order)'
         never << 'ODS and git imports, and CSID and chapter writes'
         never.each { |text| report.add('history_never_recorded', text) }
+        source.content.fetch('tables').each do |table|
+          name = table.fetch('name')
+          next if Rules::REDMINE_TABLES.include?(name) || Rules::COSMOSYS_TABLES.include?(name) || table.fetch('rows').zero?
+
+          report.add('plugin_data_not_migrated', name, rows: table.fetch('rows'))
+        end
         %w[news comments boards messages changesets repositories].each do |table|
           rows = source.table(table).length
           report.add('unsupported_content', table, rows: rows) if rows.positive?
