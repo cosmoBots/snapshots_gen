@@ -93,7 +93,7 @@ module SnapshotsGen
 
         Array(YAML.safe_load(text.to_s, permitted_classes: [], aliases: false)).map(&:to_s)
       rescue Psych::Exception
-        text.to_s.lines.filter_map { |line| line[/\A-\s*(.*)\z/, 1]&.strip&.delete_prefix("'")&.delete_suffix("'") }
+        text.to_s.lines.map(&:chomp).filter_map { |line| line[/\A-\s*(.*)\z/, 1]&.strip&.delete_prefix("'")&.delete_suffix("'") }
       end
 
       def yaml_hash(text)
@@ -103,7 +103,7 @@ module SnapshotsGen
         value.is_a?(Hash) ? value.transform_keys(&:to_s) : {}
       rescue Psych::Exception
         text.to_s.lines.each_with_object({}) do |line, result|
-          match = line.match(/\A([a-z_]+):\s*(.*)\z/)
+          match = line.chomp.match(/\A([a-z_]+):\s*(.*)\z/)
           result[match[1]] = match[2].strip.delete_prefix("'").delete_suffix("'") if match
         end
       end

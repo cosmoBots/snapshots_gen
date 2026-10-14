@@ -27,8 +27,9 @@ The format code must run on Ruby 2.7 with rubyzip 2.3 (the old instances) and on
 ```sh
 docker run --rm -v "$PWD":/w -w /w ruby:2.7 \
   bash -c 'gem install rubyzip -v 2.3.2 && ruby test/legacy_snapshot_format_test.rb'
-docker run --rm -v "$PWD":/w -w /w ruby:3.3 \
-  bash -c 'gem install rubyzip && ruby test/legacy_snapshot_format_test.rb'
+docker build -t snapshots_gen-converter converter/
+docker run --rm -v "$PWD":/w -w /w snapshots_gen-converter \
+  bash -c 'ruby test/legacy_snapshot_format_test.rb && ruby test/converter_rules_test.rb'
 ```
 
 To check a package:
