@@ -133,6 +133,7 @@ Each distinct blob is stored once, as `assets/sha256/<sha256>` with the lowercas
   ```
 
   Gap codes in version 1: `attachment_file_missing`, `attachment_unreadable`, `attachment_size_mismatch`, `attachment_digest_mismatch` and `invalid_utf8`.
+- `reports/redactions.jsonl`: every value the exporter left out on purpose, one per line, as `{ "column", "id", "reason", "table" }`. Redacted columns are also listed in their table entry; redacted settings appear only here.
 
 An empty package (no tables, no assets) is valid. It is what the skeleton writes and verifies.
 

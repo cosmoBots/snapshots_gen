@@ -23,7 +23,9 @@ module SnapshotsGen
   module LegacySnapshot
     SCHEMA = 'cosmosys-legacy-snapshot'
     SCHEMA_VERSION = '1'
-    SUPPORTED_SCHEMA_VERSIONS = ['1'].freeze
+    # The converter's history package uses the same container.
+    HISTORY_SCHEMA = 'snapshots_gen-history'
+    SUPPORTED_SCHEMAS = { SCHEMA => ['1'], HISTORY_SCHEMA => ['1'] }.freeze
     MANIFEST_PATH = 'manifest.json'
     ASSET_INDEX_PATH = 'assets/index.jsonl'
     ASSET_PATTERN = %r{\Aassets/sha256/[0-9a-f]{64}\z}.freeze
@@ -165,7 +167,9 @@ module SnapshotsGen
     class Writer
       attr_reader :directory
 
-      def initialize(directory)
+      def initialize(directory, schema: SCHEMA, schema_version: SCHEMA_VERSION)
+        @schema = schema
+        @schema_version = schema_version
         @directory = directory.to_s
         raise Error, "#{@directory} already exists" if File.exist?(@directory)
 
@@ -259,9 +263,9 @@ module SnapshotsGen
                       'sha256' => Digest::SHA256.hexdigest(content), 'bytes' => content.bytesize }
       end
 
-      def finish!(captured_at:, generator:, source:, consistency:, excluded_tables: [])
+      def finish!(captured_at:, generator:, source:, consistency:, excluded_tables: [], extra: {})
         write_asset_index([]) unless @asset_index
-        content = {
+        content = extra.merge(
           'captured_at' => captured_at,
           'generator' => generator,
           'source' => source,
@@ -270,11 +274,11 @@ module SnapshotsGen
           'excluded_tables' => excluded_tables.sort_by { |entry| entry.fetch('name') },
           'assets' => { 'index' => @asset_index, 'count' => @blobs.length, 'bytes' => @blobs.values.sum },
           'reports' => @reports.sort_by { |entry| entry.fetch('name') }
-        }
+        )
         normalized = CanonicalJson.normalize(content)
         manifest = {
-          'schema' => SCHEMA,
-          'schema_version' => SCHEMA_VERSION,
+          'schema' => @schema,
+          'schema_version' => @schema_version,
           'content_sha256' => Digest::SHA256.hexdigest(CanonicalJson.generate(normalized)),
           'content' => normalized
         }
@@ -364,7 +368,7 @@ module SnapshotsGen
         raw = File.binread(manifest_path)
         manifest = JSON.parse(raw)
         errors << 'manifest.json is not canonical JSON' unless CanonicalJson.generate(manifest) == raw.dup.force_encoding('UTF-8')
-        unless manifest['schema'] == SCHEMA && SUPPORTED_SCHEMA_VERSIONS.include?(manifest['schema_version'].to_s)
+        unless SUPPORTED_SCHEMAS.fetch(manifest['schema'], []).include?(manifest['schema_version'].to_s)
           errors << "unsupported schema #{manifest['schema'].inspect} #{manifest['schema_version'].inspect}"
           return Result.new(errors, manifest)
         end
