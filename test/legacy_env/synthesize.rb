@@ -136,6 +136,13 @@ travel_to(at(0)) do
   @v1 = Version.create!(project: @req, name: 'v1.0', status: 'open', effective_date: Date.new(2023, 3, 20), description: 'First baseline')
   @v2 = Version.create!(project: @req, name: 'v2.0', status: 'open', sharing: 'tree')
   @unused = Version.create!(project: @req, name: 'v3.0 (unused)', status: 'locked')
+  # Custom fields outside cosmoSys, kept as custom fields by the migration.
+  trackers = Tracker.where(name: %w[rq Bug]).to_a
+  @supplier = IssueCustomField.create!(name: 'Supplier', field_format: 'string', is_for_all: true, trackers: trackers,
+                                       searchable: true, description: 'Invented supplier field')
+  @risk = IssueCustomField.create!(name: 'Risk', field_format: 'list', possible_values: %w[Low Medium High],
+                                   multiple: true, is_for_all: true, trackers: trackers, is_filter: true)
+  @reviewer = IssueCustomField.create!(name: 'Reviewer', field_format: 'user', is_for_all: true, trackers: trackers)
   @mech = IssueCategory.create!(project: @req, name: 'Mechanics', assigned_to: @alice)
   @soft = IssueCategory.create!(project: @req, name: 'Software')
 end
@@ -172,6 +179,14 @@ travel_to(at(2, 3)) do
     issue.status = status('rqStable')
     issue.custom_field_values = { cf('rqLevel').id.to_s => 'Derived' }
   end
+end
+
+travel_to(at(2, 5)) do
+  edit!(@boot, @alice, 'Supplier, risk and reviewer set.') do |issue|
+    issue.custom_field_values = { @supplier.id.to_s => 'ACME Boot Ltd', @risk.id.to_s => %w[Low Medium],
+                                  @reviewer.id.to_s => @bob.id.to_s }
+  end
+  edit!(@bug, @bob) { |issue| issue.custom_field_values = { @supplier.id.to_s => 'Typo Fixers' } }
 end
 
 travel_to(at(3, 1)) do

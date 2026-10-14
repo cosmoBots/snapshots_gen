@@ -81,6 +81,13 @@ module SnapshotsGen
           puts "  #{label}: #{values.join(', ')}" if values.any?
         end
         plan.plugin_warnings.each { |warning| puts "  plugin #{warning[:id]}: #{warning[:status]}" }
+        # Shown by cosmoSys versions whose preflight reports them.
+        if plan.respond_to?(:custom_field_creations)
+          plan.custom_field_creations.each { |entry| puts "  custom field to create: #{entry['name']} (#{entry['format']})" }
+        end
+        if plan.respond_to?(:fallback_warnings)
+          plan.fallback_warnings.each { |entry| puts "  WARNING #{entry[:kind]}: #{entry[:value]} (#{entry[:items]} items)" }
+        end
         if plan.blocking_messages.any?
           plan.blocking_messages.each { |message| puts "  BLOCKING: #{message}" }
           raise Error, 'the preflight blocks this package'

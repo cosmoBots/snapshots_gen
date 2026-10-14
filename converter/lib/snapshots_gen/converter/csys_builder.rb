@@ -76,8 +76,36 @@ module SnapshotsGen
           'projects' => projects.map { |row| project_entry(row, ids) },
           'relations' => @plan.relations.select { |relation| ids.include?(@plan.items.fetch(relation['from']).project_id) }
                               .map { |relation| relation.slice('from', 'to', 'type', 'delay').merge('restricted' => false) },
-          'external_relations' => []
+          'external_relations' => [],
+          'custom_field_definitions' => custom_field_definitions(ids)
         }
+      end
+
+      # Definitions of the kept custom fields this package carries values for,
+      # in the shape of Cosmosys::ProjectSnapshotCapture. A cosmoSys that reads
+      # them creates the missing fields; one that does not relies on the
+      # importer's prepare step.
+      def custom_field_definitions(project_ids)
+        names = @plan.items.values.select { |item| project_ids.include?(item.project_id) }
+                     .flat_map { |item| Array(item.custom_fields).map { |entry| entry['id'] } }.uniq
+        links = @source.table('custom_fields_trackers').group_by { |row| row['custom_field_id'] }
+        names.filter_map { |id| @plan.custom_field(id) }.sort_by { |field| field['name'] }.map do |field|
+          trackers = Array(links[field['id']]).filter_map { |link| @plan.tracker_name(link['tracker_id']) }.flat_map do |name|
+            name == Rules::REQUIREMENT_TRACKER ? [Rules::REQUIREMENT, Rules::INFO_TRACKER] : [Rules::TRACKERS[name] || { 'key' => name, 'name' => name, 'item_profile' => nil }]
+          end
+          {
+            'name' => field['name'], 'format' => field['field_format'], 'multiple' => field['multiple'] ? true : false,
+            'possible_values' => Rules.yaml_list(field['possible_values']).then { |values| values.empty? ? nil : values },
+            'default_value' => field['default_value'], 'description' => Rules.clean(field['description']).to_s,
+            'regexp' => field['regexp'].to_s.empty? ? nil : field['regexp'], 'min_length' => field['min_length'],
+            'max_length' => field['max_length'], 'is_filter' => field['is_filter'] ? true : false,
+            'searchable' => field['searchable'] ? true : false, 'visible' => field['visible'] != false,
+            'editable' => field['editable'] != false, 'is_for_all' => field['is_for_all'] ? true : false,
+            'format_store' => Rules.yaml_hash(field['format_store']).sort.to_h,
+            'trackers' => trackers.uniq { |tracker| tracker['key'] }.map { |tracker| tracker.slice('key', 'name', 'item_profile') }
+                                  .sort_by { |tracker| tracker['key'].to_s }
+          }
+        end
       end
 
       def project_entry(row, ids)

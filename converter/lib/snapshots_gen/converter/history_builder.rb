@@ -197,7 +197,7 @@ module SnapshotsGen
           field = @plan.custom_field(id)
           {
             'id' => id, 'type' => field['type'], 'name' => field['name'], 'field_format' => field['field_format'],
-            'possible_values' => parse_yaml_list(field['possible_values']), 'multiple' => field['multiple'],
+            'possible_values' => Rules.yaml_list(field['possible_values']), 'multiple' => field['multiple'],
             'is_required' => field['is_required'], 'is_for_all' => field['is_for_all'], 'is_filter' => field['is_filter'],
             'searchable' => field['searchable'], 'default_value' => field['default_value'],
             'description' => field['description'], 'visible' => field['visible'], 'editable' => field['editable'],
@@ -209,14 +209,6 @@ module SnapshotsGen
             'projects' => Array(project_links[id]).filter_map { |link| @plan.project(link['project_id'])&.fetch('identifier') }.sort
           }
         end
-      end
-
-      def parse_yaml_list(text)
-        return [] if text.to_s.strip.empty?
-
-        Array(YAML.safe_load(text.to_s, permitted_classes: [], aliases: false)).map(&:to_s)
-      rescue Psych::Exception
-        text.to_s.lines.map { |line| line.sub(/\A-\s*/, '').strip }.reject(&:empty?)
       end
 
       def items

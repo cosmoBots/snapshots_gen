@@ -2,6 +2,7 @@
 
 require 'date'
 require 'strscan'
+require 'yaml'
 
 module SnapshotsGen
   module Converter
@@ -84,6 +85,28 @@ module SnapshotsGen
       DOCUMENT_FAMILIES = { 'AD' => 'A', 'RD' => 'R', 'CD' => 'C' }.freeze
 
       CORE_MODULES = %w[issue_tracking time_tracking news documents files wiki repository boards calendar gantt].freeze
+
+      # Old serialized YAML (possible_values, format_store). Tagged Ruby
+      # objects are read as plain lists or "key: value" lines.
+      def yaml_list(text)
+        return [] if text.to_s.strip.empty?
+
+        Array(YAML.safe_load(text.to_s, permitted_classes: [], aliases: false)).map(&:to_s)
+      rescue Psych::Exception
+        text.to_s.lines.filter_map { |line| line[/\A-\s*(.*)\z/, 1]&.strip&.delete_prefix("'")&.delete_suffix("'") }
+      end
+
+      def yaml_hash(text)
+        return {} if text.to_s.strip.empty?
+
+        value = YAML.safe_load(text.to_s, permitted_classes: [], aliases: false)
+        value.is_a?(Hash) ? value.transform_keys(&:to_s) : {}
+      rescue Psych::Exception
+        text.to_s.lines.each_with_object({}) do |line, result|
+          match = line.match(/\A([a-z_]+):\s*(.*)\z/)
+          result[match[1]] = match[2].strip.delete_prefix("'").delete_suffix("'") if match
+        end
+      end
 
       def clean(value)
         return nil if value.nil?

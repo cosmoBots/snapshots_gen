@@ -6,7 +6,7 @@ The tool has three pieces, each of which knows only one side:
 
 - `exporter/`: runs inside the old instance with `rails runner` (Ruby 2.7, Rails 5.2). It only reads, installs nothing and restarts nothing. It writes a lossless legacy snapshot: every table by name, the attachment files and a report of what it could not capture.
 - `converter/`: runs with a current Ruby, outside both instances. It turns a legacy snapshot into a `.csys` package that the cosmoSys import accepts, plus a conversion report.
-- `importer/`: runs inside the new instance with `rails runner`, after the `.csys` import and before anyone works there. It brings users, history (notes, changes, wiki versions, time entries and watchers) and the original authors and dates.
+- `importer/`: runs inside the new instance with `rails runner`. Before the `.csys` import it creates users with their passwords, groups and custom fields; it runs the `.csys` import with the cosmoSys preflight; and after it, before anyone works there, it writes the history (notes, changes, wiki versions, time entries and watchers) and restores the original authors and dates.
 
 The legacy snapshot format is specified in [docs/legacy-snapshot-format.md](docs/legacy-snapshot-format.md).
 
