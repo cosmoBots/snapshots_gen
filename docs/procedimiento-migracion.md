@@ -6,7 +6,8 @@ Este procedimiento lleva una instancia antigua de cosmoSys (Redmine 4.2 con los 
 
 - **La instancia antigua no se toca.** Solo se lee, dentro de una transacción de solo lectura. No se instala nada, no se migra la base de datos y no se reinicia el contenedor. Lo único que se escribe es un directorio temporal dentro del contenedor, que se borra al terminar.
 - **La instancia nueva tiene que estar vacía y cerrada** hasta el final del paso 7. Nadie debe trabajar en ella antes de importar el historial: Redmine usa el orden de las notas en varias funciones, y un historial añadido después quedaría desordenado. El importador se niega si encuentra notas que no sean suyas.
-- **Lo que no se migra** lo dice el informe de conversión. Entre otras cosas: lo que el cosmoSys antiguo nunca guardó en el historial (los botones de borrar y zombi, mover y reordenar en el árbol, las importaciones ODS y git), las noticias, los foros y los repositorios. Las etiquetas y la conversión de los modelos PORIS llegan en una fase posterior.
+- **Lo que no se migra** lo dice el informe de conversión. Entre otras cosas: lo que el cosmoSys antiguo nunca guardó en el historial (los botones de borrar y zombi, mover y reordenar en el árbol, las importaciones ODS y git), las noticias, los foros y los repositorios. Las etiquetas llegan en una fase posterior.
+- **Los modelos PORIS se migran en parte.** Ya llegan sus ítems, su jerarquía, sus campos personalizados (como campos personalizados) y sus relaciones, con los cambios que cuenta "Qué cambia en la conversión". En una fase posterior sus campos pasarán a los datos propios del perfil `poris` del cosmoSys nuevo y sus proyectos tomarán ese perfil; hasta entonces se importan como proyectos de ítems o de requisitos.
 - **Las contraseñas se conservan**: Redmine 4.2 y 7 las guardan igual. **El 2FA se reinicia**: quien lo usaba tiene que volver a activarlo.
 
 ## Qué cambia en la conversión
@@ -49,7 +50,7 @@ Para otro reparto, añade `roles=rqReviewer:Reporter,...` a `importar history` (
 | `csID`, `csChapter`, `depGrahInReports` | nada: el CSID y el capítulo son nativos, y la marca de informe no tiene equivalente |
 | cualquier otro campo personalizado | el mismo campo, con su definición |
 
-El historial sigue a los campos: un cambio antiguo de `rqLevel` se ve como cambio del nivel de requisito, con los valores nuevos. Hasta que cosmoSys etiquete `csExtCode` y `csWLoad` en el historial (corrección preparada), sus cambios, también los que se hagan en la instancia nueva, se leen "Translation missing"; el paso 7 lo avisa sin darlo por fallo.
+El historial sigue a los campos: un cambio antiguo de `rqLevel` se ve como cambio del nivel de requisito, con los valores nuevos. Hasta que cosmoSys etiquete `csExtCode` y `csWLoad` en el historial (corrección en revisión, cosmoBots/cosmoSys#4), sus cambios, también los que se hagan en la instancia nueva, se leen "Translation missing"; el paso 7 lo avisa sin darlo por fallo.
 
 **Estructura:**
 
@@ -63,13 +64,14 @@ El historial sigue a los campos: un cambio antiguo de `rqLevel` se ve como cambi
 ## Qué hace falta
 
 - En el servidor antiguo: acceso a `docker` y el nombre del contenedor de la instancia (en este documento, `<contenedor-antiguo>`; en el despliegue antiguo suele ser `csys_rm-<nombre>`).
-- En el servidor nuevo: Docker, un checkout de `cosmoSys_deploy` en la rama `feat/optional-plugins` y espacio para una instancia nueva.
-- En cualquiera de los dos: este repositorio, `snapshots_gen`, y Docker para el conversor.
+- En el servidor nuevo: Docker, un checkout de `cosmoSys_deploy` en `main` y espacio para una instancia nueva.
+- En cualquiera de los dos: este repositorio, `snapshots_gen`, y Docker para el conversor. El repositorio es privado: hace falta acceso a la organización cosmoBots en GitHub para clonarlo.
 - Un sitio seguro para los paquetes. **Llevan los datos de todos los usuarios, con sus correos y sus contraseñas cifradas:** se tratan como una copia de seguridad, no se envían por correo y se borran al terminar (paso 10).
 
 En los ejemplos, `snapshots_gen/` es el checkout de este repositorio y `migracion/` el directorio de trabajo, con permisos solo para su dueño:
 
 ```sh
+git clone git@github.com:cosmoBots/snapshots_gen.git
 mkdir -m 700 migracion
 ```
 
@@ -146,7 +148,7 @@ Deja en `migracion/convertido/`:
 
 ## 5. Crear la instancia nueva
 
-Crea una instancia nueva y vacía con `cosmoSys_deploy`, rama `feat/optional-plugins`, siguiendo su README:
+Crea una instancia nueva y vacía con `cosmoSys_deploy` (`main`), siguiendo su README:
 
 - variante `requirements` si la instancia antigua tenía requisitos (tracker `rq`);
 - el conjunto opcional `poris` si el inventario muestra ítems de los trackers `pr*`: trae `prSys`, `prParam`, `prMode`, `prValue` y `prCmd`, y la conversión lleva `prValFloat` y `prValText` a `prValue`;

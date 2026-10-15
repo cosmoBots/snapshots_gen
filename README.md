@@ -14,7 +14,7 @@ The migration procedure, in Spanish, is [docs/procedimiento-migracion.md](docs/p
 
 ## Status
 
-The three pieces work end to end on a synthetic old instance and on a copy of a real one: the history of every item reads as in the source. Tags and the conversion of old PORIS models to the `poris` profile come later.
+The three pieces work end to end on a synthetic old instance and on a copy of a real one: the history of every item reads as in the source. Old PORIS models already migrate with their items, hierarchy, custom fields and relations (their value trackers become `prValue` and their "blocks" relations are reversed); tags, and moving PORIS fields to the `poris` profile, come later.
 
 ## Data protection
 
