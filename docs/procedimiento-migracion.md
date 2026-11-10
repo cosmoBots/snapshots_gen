@@ -609,7 +609,6 @@ docker exec -u redmine -w /usr/src/redmine "$NUEVO" bundle exec rails runner /tm
 docker cp "$NUEVO":/tmp/sg/etiquetas-destino.jsonl migracion/
 chmod -R go-rwx migracion
 find migracion -perm /077
-chmod -R go-rwx migracion
 docker run --rm -v "$PWD:/work" snapshots_gen-converter \
   ruby snapshots_gen/test/tags/compare.rb migracion/etiquetas-origen.jsonl migracion/etiquetas-destino.jsonl migracion/convertido/report.json
 ```
