@@ -144,6 +144,38 @@ class ConverterTagsTest < Minitest::Test
     end
   end
 
+  # R1 of the adversarial review: a tag removed from an item that is absorbed
+  # into a document, or whose item is not in the source, leaves no current
+  # tagging; its change in the history must not disappear in silence.
+  def test_tag_changes_in_the_history_of_items_that_are_not_migrated_block
+    tables = tag_tables([tag(1, 'one', 1)], [tagging(1, 1, 'Issue', 1)])
+    tables['journals'] = [
+      { 'id' => 98, 'journalized_id' => 1, 'journalized_type' => 'Issue', 'user_id' => 1, 'notes' => '', 'private_notes' => false, 'created_on' => TIME },
+      { 'id' => 99, 'journalized_id' => 5, 'journalized_type' => 'Issue', 'user_id' => 1, 'notes' => '', 'private_notes' => false, 'created_on' => TIME },
+      { 'id' => 100, 'journalized_id' => 999, 'journalized_type' => 'Issue', 'user_id' => 1, 'notes' => 'x', 'private_notes' => false, 'created_on' => TIME },
+      { 'id' => 101, 'journalized_id' => 5, 'journalized_type' => 'Issue', 'user_id' => 1, 'notes' => 'only a note', 'private_notes' => false,
+        'created_on' => TIME }
+    ]
+    tables['journal_details'] = [
+      { 'id' => 1, 'journal_id' => 98, 'property' => 'attr', 'prop_key' => 'tag_list', 'old_value' => '', 'value' => 'one' },
+      { 'id' => 2, 'journal_id' => 99, 'property' => 'attr', 'prop_key' => 'tag_list', 'old_value' => 'synthetic-old-tag', 'value' => '' },
+      { 'id' => 3, 'journal_id' => 99, 'property' => 'attr', 'prop_key' => 'subject', 'old_value' => 'a', 'value' => 'b' },
+      { 'id' => 4, 'journal_id' => 100, 'property' => 'attr', 'prop_key' => 'tag_list', 'old_value' => 'gone', 'value' => '' }
+    ]
+    convert(tables) do |package, summary, report|
+      refute package.importable?
+      assert summary['blocking']
+      assert_equal %w[history_tag_change_dropped], blocking(package)
+      dropped = package.rows.fetch('anomalies').select { |row| row['code'] == 'history_tag_change_dropped' }
+      assert_equal [[2], [4]], dropped.map { |row| row['source_ids'] }
+      assert_equal %w[history history], dropped.map { |row| row['table'] }
+      assert_equal ['journal 99 of Issue:5: absorbed into document', 'journal 100 of Issue:999: not in source'], dropped.map { |row| row['reason'] }
+      entry = report['entries'].find { |row| row['code'] == 'tags_blocking' && row['subject'] == 'history_tag_change_dropped' }
+      assert_equal 2, entry['detail']['records']
+      refute_includes JSON.generate(report), 'synthetic-old-tag'
+    end
+  end
+
   def test_tag_permissions_of_the_source_roles
     tables = tag_tables([tag(1, 'one', 1)], [tagging(1, 1, 'Issue', 1)])
     tables['roles'] += [

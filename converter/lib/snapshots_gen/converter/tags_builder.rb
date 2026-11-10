@@ -36,11 +36,14 @@ module SnapshotsGen
 
       # csys: [{ 'path', 'root_identifier', 'content_sha256' }] of every
       # sibling .csys; history_path: the sibling .cshistory, already written.
-      def initialize(plan, history_path:, csys:)
+      # dropped_tag_changes: the tag changes of the history that the history
+      # package could not keep (HistoryBuilder#dropped_tag_changes).
+      def initialize(plan, history_path:, csys:, dropped_tag_changes: [])
         @plan = plan
         @source = plan.source
         @history_path = history_path
         @csys = csys
+        @dropped_tag_changes = dropped_tag_changes
         @anomalies = []
       end
 
@@ -59,6 +62,10 @@ module SnapshotsGen
         settings = resolve_settings
         check_visibility(settings, taggings)
         roles = role_rows
+        @dropped_tag_changes.each do |entry|
+          anomaly('history_tag_change_dropped', 'history', entry.fetch('detail_ids'),
+                  "journal #{entry.fetch('journal_id')} of Issue:#{entry.fetch('issue_id')}: #{entry.fetch('reason').tr('_', ' ')}")
+        end
         anomalies = @anomalies.sort_by { |row| TagsPackage.anomaly_sort_key(row) }.each_with_index.map { |row, index| row.merge('id' => index + 1) }
         @rows = { 'tags' => tags, 'taggings' => taggings, 'objects' => objects.values.sort_by { |row| TagsPackage.object_sort_key(row) },
                   'roles' => roles, 'anomalies' => anomalies }

@@ -95,6 +95,7 @@ module SnapshotsGen
       'duplicate_projection' => ['blocking', 'Taggings that collapse into one in the destination (same object and name)'],
       'ambiguous_object' => ['blocking', 'Tagged objects whose destination identity is not unique'],
       'missing_settings' => ['blocking', 'Tag activation settings that cannot be determined'],
+      'history_tag_change_dropped' => ['blocking', 'Tag changes in the history of items absorbed into documents or not in the source: the history cannot keep them'],
       'ambiguous_untagged_object' => ['warning', 'Untagged objects whose destination identity is not unique'],
       'invalid_setting' => ['warning', 'Tag display settings that cannot be determined (the destination default stays)'],
       'tags_not_visible' => ['warning', 'Tagged object types whose tags are switched off in the settings'],
@@ -106,7 +107,7 @@ module SnapshotsGen
       'counter_mismatch' => ['information', 'Tags whose stored taggings_count differs from their real count (recomputed on import)']
     }.freeze
     SEVERITIES = %w[blocking warning information].freeze
-    ANOMALY_TABLES = %w[tags taggings objects roles settings].freeze
+    ANOMALY_TABLES = %w[tags taggings objects roles settings history].freeze
 
     MAX_ENTRY_BYTES = 1 << 30
 

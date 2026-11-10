@@ -23,11 +23,18 @@ module SnapshotsGen
       # never parsed, split or rewritten, so nil, commas and quotes survive.
       ATTR_LITERALS = %w[subject description start_date due_date done_ratio estimated_hours is_private tag_list].freeze
 
+      # Tag changes (attr/tag_list details) of journals that the history
+      # skips because their item is absorbed into a document or is not in the
+      # source: { 'journal_id', 'issue_id', 'detail_ids', 'reason' }. The tags
+      # package reports them as blocking (history_tag_change_dropped).
+      attr_reader :dropped_tag_changes
+
       def initialize(plan, csys_packages:)
         @plan = plan
         @source = plan.source
         @report = plan.report
         @csys_packages = csys_packages
+        @dropped_tag_changes = []
       end
 
       def write(directory)
@@ -275,11 +282,13 @@ module SnapshotsGen
 
           if @plan.absorbed.key?(journal['journalized_id'])
             document_journals += 1
+            drop_tag_changes(journal, details_by_journal, 'absorbed_into_document')
             next
           end
           item = @plan.item_for_issue(journal['journalized_id'])
           unless item
             @report.add('history_journal_dropped', "journal ##{journal['id']}", reason: 'its item is not in the source')
+            drop_tag_changes(journal, details_by_journal, 'not_in_source')
             next
           end
           details = Array(details_by_journal[journal['id']]).sort_by { |row| row['id'] }.filter_map do |detail|
@@ -301,6 +310,14 @@ module SnapshotsGen
         end
         @report.add('history_journal_document', nil, journals: document_journals) if document_journals.positive?
         rows
+      end
+
+      def drop_tag_changes(journal, details_by_journal, reason)
+        ids = Array(details_by_journal[journal['id']]).select { |row| row['property'] == 'attr' && row['prop_key'] == 'tag_list' }
+                                                      .map { |row| row['id'] }.sort_by { |id| LegacySnapshot::Values.sort_key(id) }
+        return if ids.empty?
+
+        @dropped_tag_changes << { 'journal_id' => journal['id'], 'issue_id' => journal['journalized_id'], 'detail_ids' => ids, 'reason' => reason }
       end
 
       def translate_detail(item, journal, detail)

@@ -211,8 +211,8 @@ Example: `{"builtin":0,"id":4,"name":"Reader","ordinal":4,"tag_permissions":["vi
 | --- | --- |
 | `id` | 1, 2, ... in file order. |
 | `code`, `severity` | The code and its fixed severity (table below). |
-| `table` | `tags`, `taggings`, `objects`, `roles` or `settings`. |
-| `source_ids` | The ids involved: tag, tagging or role ids (`"ordinal:<n>"` when the id is null), object ids, or setting keys. |
+| `table` | `tags`, `taggings`, `objects`, `roles`, `settings` or `history`. |
+| `source_ids` | The ids involved: tag, tagging or role ids (`"ordinal:<n>"` when the id is null), object ids, setting keys, or `journal_details` ids for `history`. |
 | `reason` | A generic sentence. It never holds a tag name or any content. |
 
 Sorted by `code`, `table` and `source_ids`. The codes of version 1:
@@ -235,6 +235,7 @@ Sorted by `code`, `table` and `source_ids`. The codes of version 1:
 | `duplicate_projection` | blocking | Taggings that would collapse into one destination row. |
 | `ambiguous_object` | blocking | A tagged object shares its destination identity with another. |
 | `missing_settings` | blocking | `active_issue_tags` or `active_wiki_tags` cannot be determined. |
+| `history_tag_change_dropped` | blocking | A journal of an item absorbed into a document, or of an item that is not in the source, has tag changes (`attr`/`tag_list` details). The history package cannot keep that journal, so the change would be lost; it is a tag that may have no current tagging left, so nothing else would show it. One anomaly per journal, with its detail ids; the reason names the journal and the source item, never the tags. |
 | `ambiguous_untagged_object` | warning | An untagged object shares its destination identity with another. |
 | `invalid_setting` | warning | A display setting cannot be determined; the destination keeps its default. |
 | `tags_not_visible` | warning | A tagged object type is switched off. |
@@ -277,8 +278,8 @@ Sorted by `code`, `table` and `source_ids`. The codes of version 1:
 
 ## History
 
-Tag changes in the history are not part of this package. The old plugin recorded them as journal details `property` `attr`, `prop_key` `tag_list`, with the old and new lists printed as text. The `.cshistory` carries them as literal attributes, exactly as stored (`null`, commas and quotes included), without parsing or rewriting them; the history package format does not change. The new plugin labels `tag_list` in English and Spanish and hides these details from users without `view_issue_tags`.
+Tag changes in the history are not part of this package, except as evidence of the ones the history cannot keep (`history_tag_change_dropped`). The old plugin recorded them as journal details `property` `attr`, `prop_key` `tag_list`, with the old and new lists printed as text. The `.cshistory` carries them as literal attributes, exactly as stored (`null`, commas and quotes included), without parsing or rewriting them; the history package format does not change. The new plugin labels `tag_list` in English and Spanish and hides these details from users without `view_issue_tags`.
 
 ## Versioning
 
-Version 1 readers accept only `schema` `cosmosys-tags` and `schema_version` `"1"`. Version 1 was extended in place before any package was published: the code `comma_in_name`, `tables/roles.jsonl`, the counts `source_roles` and `roles_with_tag_permissions` and the code `unreadable_role_permissions` are part of it. Any change to identity, names, context, tagger, order, the profile or the meaning of a row needs a new version, and so does any new exception to the strict profile. The version 1 verifier also rejects keys, anomaly codes and counts it does not know, so adding any of them needs a new version as well.
+Version 1 readers accept only `schema` `cosmosys-tags` and `schema_version` `"1"`. Version 1 was extended in place before any package was published: the code `comma_in_name`, `tables/roles.jsonl`, the counts `source_roles` and `roles_with_tag_permissions`, the code `unreadable_role_permissions`, and the code `history_tag_change_dropped` with the anomaly table `history` are part of it. Any change to identity, names, context, tagger, order, the profile or the meaning of a row needs a new version, and so does any new exception to the strict profile. The version 1 verifier also rejects keys, anomaly codes and counts it does not know, so adding any of them needs a new version as well.
