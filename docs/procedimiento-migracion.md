@@ -69,7 +69,7 @@ El historial sigue a los campos: un cambio antiguo de `rqLevel` se ve como cambi
 - Los ítems `AD n`, `RD n` y `CD n` pasan a ser documentos del proyecto, con su posición en el catálogo. Si el título trae código, versión y fecha, se extraen.
 - Un requisito o un `csRefDoc` con hijos queda dentro de un capítulo generado, "Group: <título>", porque en el modelo nuevo no pueden tener hijos.
 - Cada ítem que solo existe en la instancia nueva (los capítulos "Group: ...", los capítulos "Project data" y sus datos) tiene en el informe de conversión una entrada `item_generated` con su CSID final y el ítem del origen del que sale. Los CSID renumerados (`identity_renumbered`) son solo los de ítems del origen.
-- Los CSID se conservan, también los que tienen el prefijo de otro proyecto porque el ítem se movió. Solo se renumera un ítem sin CSID o con uno repetido en su árbol.
+- Los CSID se conservan, también los que tienen el prefijo de otro proyecto porque el ítem se movió, con dos excepciones que el informe de conversión enseña con el CSID de antes y el de después. El cosmoSys nuevo solo admite letras y números en el código de un proyecto: si el de un proyecto lleva guiones u otros caracteres, se normaliza (`project_code_normalized`) y los CSID de sus ítems cambian de prefijo con él (`identity_prefix_normalized`, por ejemplo `ABC-X-0007` pasa a `ABCX-0007`; el número no cambia). Y un ítem sin CSID o con uno repetido en su árbol se renumera (`identity_renumbered`).
 - En los modelos PORIS, una relación "bloquea" va al revés que antes: el modo bloquea lo que incluye (sus submodos y sus valores). La conversión invierte esas relaciones y sus cambios en el historial, pero el plugin `cosmosys_poris` actual no las acepta (ver "Qué hace y qué no").
 
 **Historial que nombra registros borrados:** si un cambio antiguo tiene como valor anterior o nuevo un ítem, estado, tracker, prioridad, categoría, versión o proyecto que se borró en la instancia antigua, la conversión conserva el otro lado y deja ese vacío. Redmine 4.2 ya enseñaba vacíos los estados, las versiones y los demás registros borrados. Un padre borrado lo enseñaba con su número, pero en la instancia nueva ese número sería el de otro ítem, así que también se deja vacío: "Tarea padre cambiado de #120 a #135" pasa a "Item padre establecido a #<nuevo número de 135>". Si no queda ningún lado, el cambio se quita; el journal solo se quita si no le queda ni nota ni otro cambio. Todo queda en el informe de conversión (`history_reference_cleared` y `history_reference_dropped`), con el CSID del ítem y el journal.
@@ -219,6 +219,8 @@ git -C snapshots_gen archive --format=tar.gz --prefix=snapshots_gen/ -o snapshot
 tar xzf snapshots_gen.tar.gz                                                                       # en el servidor antiguo, en su directorio de trabajo
 ```
 
+El archivo no lleva `.git`, así que en el servidor antiguo no se puede volver a preguntar la revisión: anota la que imprimió `git rev-parse HEAD` antes de crearlo, y comprueba que llegó entero comparando `sha256sum snapshots_gen.tar.gz` en los dos servidores.
+
 Las órdenes usan unas variables de la terminal. En el servidor antiguo:
 
 ```sh
@@ -263,7 +265,7 @@ El `chown` hace falta porque `docker cp` deja los ficheros a nombre de root dent
 - `Attachments`: cuánto ocupan (para el espacio) y cuántos no tienen fichero. Los que no tienen fichero no se pueden migrar; el informe de conversión los cuenta.
 - `Users`: cuántos tienen 2FA (tendrán que volver a activarlo) y cuántos usan autenticación externa (LDAP), que no podrán entrar hasta que se les dé una contraseña.
 - `Ambiguous Markdown tables`: tablas Markdown con la cabecera sangrada, que el cosmoSys nuevo enseña como código. No bloquean; el informe de conversión dice dónde están.
-- `Tags`: las etiquetas, solo recuentos (nunca nombres). Lo normal es que todo lo que va después del punto y coma valga 0, con un solo contexto y 0 con autor: entonces no hay nada que decidir. Qué significa cada recuento:
+- `Tags`: las etiquetas, solo recuentos (nunca nombres). Lo normal es que haya un solo contexto, 0 con autor y que todos los recuentos que van después del punto y coma valgan 0, salvo el último (`tag changes in the history`, que solo cuenta cambios del historial que se migran): entonces no hay nada que decidir. Qué significa cada recuento:
   - `tags`, `unused` y `taggings` (por tipo): cuántas etiquetas hay, cuántas no usa ningún ítem ni página, y cuántos etiquetados hay en ítems (`Issue`) y en páginas de wiki (`WikiPage`). Todas se migran, también las sin uso, pero el plugin nuevo borra las sin uso en cuanto alguien edita un ítem. Otro tipo distinto de `Issue` y `WikiPage` no se puede migrar: la conversión lo bloquea.
   - `distinct contexts` y `with tagger`: el plugin nuevo no tiene contexto ni autor de cada etiquetado. Con 1 contexto y 0 con autor todo encaja; si no, la conversión bloquea y hay que decidir qué hacer con esos etiquetados antes de seguir.
   - `names with a comma`: nombres como `A,B`. Se importan como una sola etiqueta, pero la primera edición normal del ítem la parte en `A` y `B`.
@@ -289,6 +291,8 @@ En el servidor antiguo.
 docker exec -u redmine -w /usr/src/redmine "$ANTIGUO" \
   bundle exec rails runner -e production /tmp/snapshots_gen-code/exporter/export.rb capture out=/tmp/snapshots_gen-out/exportado label="$NOMBRE"
 docker cp "$ANTIGUO":/tmp/snapshots_gen-out/exportado migracion/exportado
+chmod -R go-rwx migracion
+find migracion -perm /077
 ```
 
 El exportador lee todo en una sola transacción de solo lectura, copia los adjuntos, comprueba que los recuentos no han cambiado mientras leía y verifica el paquete antes de terminar. Al final dice:
@@ -313,6 +317,8 @@ docker exec -u redmine -w /usr/src/redmine "$ANTIGUO" \
   bundle exec rails runner -e production /tmp/snapshots_gen-code/tags/extract_source.rb /tmp/snapshots_gen-out/etiquetas-origen.jsonl
 docker cp "$ANTIGUO":/tmp/snapshots_gen-out/historial-origen.jsonl migracion/
 docker cp "$ANTIGUO":/tmp/snapshots_gen-out/etiquetas-origen.jsonl migracion/
+chmod -R go-rwx migracion
+find migracion -perm /077
 ```
 
 La primera dice `wrote /tmp/snapshots_gen-out/historial-origen.jsonl` y la segunda `tags evidence: objects=N tags=N assignments=N`. El `es` es el idioma en el que se pinta el historial: el paso 7 usa el mismo.
@@ -485,7 +491,7 @@ Ninguno avisa a nadie: mientras corren, el importador hace que Redmine no vea ev
 importar prepare /tmp/sg/pkg/"$NOMBRE".cshistory
 ```
 
-Termina con una línea `Prepared: created_users=N, ...`. Revisa lo que dice de los roles (`Role rqWriter -> Developer`...). Si un rol antiguo no tiene destino, sus membresías no se importarán; créalo en la instancia nueva o indica otro con `roles=rqWriter:Developer,...` en el paso 6.3. Si dice `Missing trackers (the .csys import will refuse their items): ...`, crea esos trackers (paso 5.3) y repite esta orden.
+Termina con una línea `Prepared: created_users=N, ...` (o solo `Prepared:` si no había nada que crear, por ejemplo al repetirla). Revisa lo que dice de los roles (`Role rqWriter -> Developer`...). Si un rol antiguo no tiene destino, sus membresías no se importarán; créalo en la instancia nueva o indica otro con `roles=rqWriter:Developer,...` en el paso 6.3. Si dice `Missing trackers (the .csys import will refuse their items): ...`, crea esos trackers (paso 5.3) y repite esta orden.
 
 **6.2. Importar cada paquete de proyecto:** hay un `.csys` por proyecto raíz de la instancia antigua (`ls migracion/convertido/*.csys`), y da igual en qué orden se importen. Cada uno, primero sin confirmar, que solo enseña el preflight de cosmoSys (el mismo que la interfaz):
 
@@ -573,6 +579,8 @@ Pinta el historial de cada ítem de la instancia nueva, en el mismo idioma que l
 ```sh
 docker exec -u redmine -w /usr/src/redmine "$NUEVO" bundle exec rails runner /tmp/sg/history_text.rb /tmp/sg/historial-destino.jsonl es
 docker cp "$NUEVO":/tmp/sg/historial-destino.jsonl migracion/
+chmod -R go-rwx migracion
+find migracion -perm /077
 INFORME=$(grep -l '"dry_run": false' migracion/importado/history-import-*.json); echo "$INFORME"
 docker run --rm -v "$PWD:/work" snapshots_gen-converter \
   ruby snapshots_gen/test/compare_history.rb migracion/historial-origen.jsonl migracion/historial-destino.jsonl migracion/convertido/report.json \
@@ -599,6 +607,8 @@ Lee por SQL todas las etiquetas de la instancia nueva, sin pasar por el plugin, 
 ```sh
 docker exec -u redmine -w /usr/src/redmine "$NUEVO" bundle exec rails runner /tmp/sg/tags/extract_target.rb /tmp/sg/etiquetas-destino.jsonl
 docker cp "$NUEVO":/tmp/sg/etiquetas-destino.jsonl migracion/
+chmod -R go-rwx migracion
+find migracion -perm /077
 chmod -R go-rwx migracion
 docker run --rm -v "$PWD:/work" snapshots_gen-converter \
   ruby snapshots_gen/test/tags/compare.rb migracion/etiquetas-origen.jsonl migracion/etiquetas-destino.jsonl migracion/convertido/report.json
@@ -713,6 +723,8 @@ echo "$COSMOSYS_ENV_FILE"
 ```sh
 (cd "$DEPLOY" && RESTORE_CONFIRMATION=ERASE_EXISTING_COSMOSYS_DATA ./scripts/restore.sh "$COPIA")
 ```
+
+La copia del paso 8.1 se hizo antes de publicar, así que la restauración devuelve también el "Nombre y ruta del servidor" y el "Protocolo" de entonces (`localhost:3000` y HTTP). La dirección y el puerto de escucha no cambian, porque están en el fichero de entorno. Después de restaurar, vuelve a ponerlos en Redmine como en el paso 8.2 y repite su comprobación.
 
 Por eso la instancia antigua parada y la copia del paso 8.1 se conservan el tiempo acordado. Pasado ese tiempo, paso 10.
 
