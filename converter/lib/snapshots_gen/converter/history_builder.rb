@@ -285,7 +285,7 @@ module SnapshotsGen
           notes = Rules.clean(journal['notes']).to_s
           if notes.strip.empty? && details.empty?
             notes_dropped += 1
-            @report.add('history_journal_dropped', "journal ##{journal['id']}", item: item.key,
+            @report.add('history_journal_dropped', "journal ##{journal['id']}", item: item.key, csid: item.csid,
                                                                               reason: 'no translatable change left')
             next
           end
@@ -308,7 +308,7 @@ module SnapshotsGen
         case property
         when 'attr'
           if ATTR_REFS.key?(key)
-            base.merge('value_ref' => ATTR_REFS.fetch(key))
+            translate_reference(item, journal, detail, base.merge('value_ref' => ATTR_REFS.fetch(key)))
           elsif key == 'description'
             base.merge('old_value' => references(detail['old_value'], "detail ##{detail['id']}"),
                        'value' => references(detail['value'], "detail ##{detail['id']}"))
@@ -366,8 +366,50 @@ module SnapshotsGen
       end
 
       def drop(detail, item, reason)
-        @report.add('history_detail_dropped', "detail ##{detail['id']}", item: item.key, reason: reason)
+        @report.add('history_detail_dropped', "detail ##{detail['id']}", item: item.key, csid: item.csid,
+                                                                          journal: detail['journal_id'], reason: reason)
         nil
+      end
+
+      # Entities whose source ids the converter can check; users are mapped by
+      # the importer (a deleted user becomes the anonymous user, as in Redmine).
+      SOURCE_TABLES = {
+        'statuses' => 'issue_statuses', 'trackers' => 'trackers', 'priorities' => 'enumerations',
+        'categories' => 'issue_categories', 'versions' => 'versions', 'projects' => 'projects'
+      }.freeze
+
+      # A change whose old or new value names a record deleted from the old
+      # instance. Redmine 4.2 shows a deleted status, version, category... as
+      # nothing and a deleted parent as its bare number, which in the new
+      # instance would name another item. That side is left empty, so the
+      # change never points to a wrong record and the journal keeps it; when
+      # no side is left, the change says nothing and is dropped. Both cases
+      # are reported, so the importer never has to drop a reference itself.
+      def translate_reference(item, journal, detail, row)
+        missing = { 'old_value' => 'old', 'value' => 'new' }.reject do |column, _side|
+          row[column].to_s.empty? || source_record?(row['value_ref'], row[column])
+        end
+        return row if missing.empty?
+
+        cleared = row.merge(missing.keys.to_h { |column| [column, nil] })
+        empty = cleared['old_value'].to_s.empty? && cleared['value'].to_s.empty?
+        @report.add(empty ? 'history_reference_dropped' : 'history_reference_cleared', "detail ##{detail['id']}",
+                    item: item.key, csid: item.csid, journal: journal['id'], field: detail['prop_key'],
+                    missing: missing.values, old_value: detail['old_value'], value: detail['value'])
+        empty ? nil : cleared
+      end
+
+      def source_record?(entity, value)
+        id = Integer(value.to_s, exception: false)
+        return true if id.nil? # not an id: left to the importer, which reports it
+        return !@plan.item_for_issue(id).nil? if entity == 'items'
+        return true unless SOURCE_TABLES.key?(entity)
+
+        @source_ids ||= {}
+        @source_ids[entity] ||= table(SOURCE_TABLES.fetch(entity)).filter_map do |row|
+          row['id'] unless entity == 'priorities' && row['type'] != 'IssuePriority'
+        end.to_set
+        @source_ids[entity].include?(id)
       end
 
       # Every "#id" of a migrated item becomes a placeholder the importer

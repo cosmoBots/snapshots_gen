@@ -59,6 +59,8 @@ El historial sigue a los campos: un cambio antiguo de `rqLevel` se ve como cambi
 - Los CSID se conservan, también los que tienen el prefijo de otro proyecto porque el ítem se movió. Solo se renumera un ítem sin CSID o con uno repetido en su árbol.
 - En los modelos PORIS, una relación "bloquea" va al revés que antes: el modo bloquea lo que incluye (sus submodos y sus valores). La conversión invierte esas relaciones y sus cambios en el historial.
 
+**Historial que nombra registros borrados:** si un cambio antiguo tiene como valor anterior o nuevo un ítem, estado, tracker, prioridad, categoría, versión o proyecto que se borró en la instancia antigua, la conversión conserva el otro lado y deja ese vacío. Redmine 4.2 ya enseñaba vacíos los estados, las versiones y los demás registros borrados. Un padre borrado lo enseñaba con su número, pero en la instancia nueva ese número sería el de otro ítem, así que también se deja vacío: "Tarea padre cambiado de #120 a #135" pasa a "Item padre establecido a #<nuevo número de 135>". Si no queda ningún lado, el cambio se quita; el journal solo se quita si no le queda ni nota ni otro cambio. Todo queda en el informe de conversión (`history_reference_cleared` y `history_reference_dropped`), con el CSID del ítem y el journal.
+
 **Personas:** los usuarios se emparejan por login. Si ya existían en la instancia nueva (como `admin`), conservan su contraseña y toman el nombre de origen. Si no, se crean con su contraseña de siempre. El asignado de cada ítem llega con el historial (paso 6.3), porque Redmine solo deja asignar a miembros del proyecto.
 
 ## Qué hace falta
@@ -142,8 +144,8 @@ Deja en `migracion/convertido/`:
 **Lee `report.md` antes de seguir.** Está ordenado por gravedad:
 
 - `Blocking`: no se puede seguir. La orden termina con código 1.
-- `Warning`: algo se pierde o se adapta y conviene saberlo: adjuntos sin fichero, referencias `#id` a ítems que no existen, cambios del historial que no se pueden traducir, tablas Markdown ambiguas.
-- `Transformation`: lo que la conversión cambia a propósito, por ejemplo los estados `rqDraft` a `Draft`, los campos `rq*` a los campos nativos, los ítems `AD n`/`RD n`/`CD n` a documentos o los CSID renumerados.
+- `Warning`: algo se pierde o se adapta y conviene saberlo: adjuntos sin fichero, referencias `#id` a ítems que no existen, cambios del historial que no se pueden traducir o que solo nombraban registros borrados, tablas Markdown ambiguas.
+- `Transformation`: lo que la conversión cambia a propósito, por ejemplo los estados `rqDraft` a `Draft`, los campos `rq*` a los campos nativos, los ítems `AD n`/`RD n`/`CD n` a documentos, los CSID renumerados o el lado vacío de un cambio del historial que nombraba un registro borrado.
 - `Information`: lo que no se puede recuperar porque nunca se guardó, los usuarios cuyo 2FA se reinicia y los roles de las membresías.
 
 ## 5. Crear la instancia nueva

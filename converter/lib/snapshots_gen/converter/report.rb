@@ -47,6 +47,8 @@ module SnapshotsGen
         'textile_source' => ['blocking', 'Textile content needs a conversion that this version does not do'],
         'history_detail_dropped' => ['warning', 'History details that cannot be translated'],
         'history_journal_dropped' => ['warning', 'Journals left empty after dropping details'],
+        'history_reference_cleared' => ['transformation', 'History changes naming a record deleted from the source: that side left empty'],
+        'history_reference_dropped' => ['warning', 'History changes whose every side names a record deleted from the source'],
         'history_journal_document' => ['information', 'Journals of AD/RD/CD items (absorbed into documents)'],
         'history_never_recorded' => ['information', 'Changes the old cosmoSys never recorded in the history'],
         'wiki_version_gap' => ['information', 'Wiki versions missing in the source'],
