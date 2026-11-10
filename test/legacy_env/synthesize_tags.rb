@@ -78,7 +78,11 @@ module SyntheticTags
       # Delete only synthetic tag state, leaving its journal evidence intact.
       db.execute('DELETE FROM additional_taggings')
       db.execute('DELETE FROM additional_tags')
-      settings = Setting.plugin_additional_tags.dup
+      # Store what Redmine's plugin settings page stores: a
+      # HashWithIndifferentAccess with string keys. Without a stored row the
+      # plugin returns its defaults with symbol keys, and merging string keys
+      # into those would keep both forms of the same key.
+      settings = ActiveSupport::HashWithIndifferentAccess.new(Setting.plugin_additional_tags)
       settings.merge!('active_issue_tags' => '1', 'active_wiki_tags' => '1',
                       'use_colors' => '0', 'g3_synthetic_marker' => mode)
       Setting.plugin_additional_tags = settings
