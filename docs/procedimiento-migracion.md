@@ -742,22 +742,41 @@ No tiene que imprimir nada de esta migración. cosmoSys también exporta proyect
 
 ## Si algo falla
 
-| Mensaje | Qué pasa y qué hacer |
-| --- | --- |
-| `the package does not verify` | El paquete está dañado o incompleto, por ejemplo por una copia cortada. Vuelve a copiarlo o a exportar. |
-| `row counts changed during the capture` | Alguien cambió la instancia antigua mientras se exportaba. Congélala (paso 2) y repite el paso 3. |
-| `BLOCKING: ... trackers missing` | Falta en la instancia nueva un tracker con ítems en la antigua. Créalo con el mismo nombre y repite el paso 6.2. |
-| `BLOCKING: ... identifiers taken` | La instancia nueva ya tiene un proyecto con ese identificador. Tiene que estar vacía (paso 5). |
-| `projects not imported yet` | Falta importar algún `.csys` (paso 6.2). |
-| `journals already exist on the imported items` | Alguien ha trabajado en la instancia nueva antes de importar el historial. Empieza de nuevo desde el paso 5. |
-| `verification failed, nothing was written` | El historial no se ha importado. La lista dice qué no cuadra; manda el mensaje y el informe de conversión. |
-| `active webhooks exist` | Desactiva los webhooks de la instancia nueva durante la importación. |
-| `the tags package does not verify` | El `.cstags` está dañado, o en `/tmp/sg/pkg` no están exactamente el `.cshistory` y todos los `.csys` de la misma conversión (`not the ones this tags package was converted with`). Vuelve a copiar los paquetes de `migracion/convertido/` (paso 5) y quita cualquier otro. |
-| `the tags package is not importable` | La conversión encontró etiquetas que el plugin nuevo no puede guardar igual (`tags_blocking` en `report.md`, paso 4). No se puede seguir sin decidir qué hacer con ellas; manda el informe de conversión. |
-| `the tag plugin is not ready in this instance` | La instancia nueva no tiene el conjunto `tags`, o sus migraciones no se han aplicado. Créala con `COSMOSYS_PLUGINS=tags` (paso 5). |
-| `the tag tables are not the ones this importer knows` | El plugin de etiquetas de la instancia nueva no es el que este procedimiento conoce (`additional_tags` 4.6). No se ha escrito nada; manda el mensaje. |
-| `the history is not imported yet` | Las etiquetas van después del historial (paso 6.3). |
-| `the history in this instance is not the one of this history package` | Los cambios de etiquetas del historial de la instancia nueva no son los del `.cshistory` que hay junto al `.cstags`: el historial se importó de otra conversión, o alguien ha editado ítems. No se ha escrito nada. Empieza de nuevo desde el paso 5 con los paquetes de una sola conversión. |
-| `objects of the package that are not exactly one object here` | Falta importar algún `.csys`, o un ítem o una página del paquete no está en la instancia nueva (o está más de una vez). No se ha escrito nada; manda el mensaje. |
-| `conflicts with tags that already exist in this instance` | La instancia nueva ya tenía etiquetas que no son las del paquete en los mismos ítems, o con el mismo nombre y otras fechas, o que solo se distinguen por las mayúsculas. Alguien ha trabajado en ella: empieza de nuevo desde el paso 5. |
-| `verification failed, nothing was written` (en `tags`) | Lo escrito no coincide con el paquete o ha cambiado algo más. Las etiquetas no se han importado. La lista nombra ítems y etiquetas por número y huella, sin nombres; manda el mensaje. |
+Cuando haya que pedir ayuda, basta con el mensaje, el paso y, si hace falta, los títulos de `report.md` con sus recuentos (`grep '^###' migracion/convertido/report.md`). Nunca los paquetes, los informes enteros ni los JSONL (ver "Material sensible").
+
+| Mensaje | Paso | Qué pasa y qué hacer |
+| --- | --- | --- |
+| `No such container` | cualquiera | La variable `ANTIGUO` o `NUEVO` está vacía o no es la del contenedor, por ejemplo porque has abierto otra terminal o porque el contenedor se ha recreado. Vuelve a definirla ("Preparar el directorio de trabajo" y paso 5.2). |
+| `cannot load such file -- /tmp/...` (`LoadError`) o `... could not be found` | 1, 3, 6, 7 | El usuario `redmine` del contenedor no puede leer el código copiado. Repite el `chown` del paso 1 (contenedor antiguo) o del 5.4 (contenedor nuevo). |
+| `Tags: no additional_tags and additional_taggings tables` | 1 | La instancia antigua no tiene el plugin de etiquetas, y la conversión se bloqueará (`missing_table`). Para y pregunta antes de seguir. |
+| `the package does not verify` | 3, 4 | El paquete está dañado o incompleto, por ejemplo por una copia cortada. Vuelve a copiarlo (paso 3.4) o a exportar. |
+| `row counts changed during the capture` | 3 | Alguien cambió la instancia antigua mientras se exportaba. Congélala (paso 2) y repite el paso 3. |
+| `output already exists` | 3.2, 7.3 | La extracción de etiquetas no sobrescribe nunca un fichero. Bórralo dentro del contenedor (o usa otro nombre) y repite. |
+| `Unable to find image 'snapshots_gen-converter:latest' locally` o `pull access denied for snapshots_gen-converter` | 4, 7 | La imagen del conversor no está construida en este servidor. Constrúyela con la primera orden del paso 4. |
+| `migracion/convertido already exists` | 4 | Ya hubo una conversión. Para repetirla, borra `migracion/convertido`; si ya importaste algo, empieza también de nuevo desde el paso 5. |
+| `blocking: true` (y código 1) | 4 | `report.md` tiene algo en `Blocking`, por ejemplo `tags_blocking` si el `.cstags` no es importable. No se puede seguir sin resolverlo; los títulos de `report.md` dicen qué es. |
+| `Set POSTGRES_PASSWORD in .env` (o la misma frase con otra variable) | 5 | Al fichero de entorno le falta esa variable, o `COSMOSYS_ENV_FILE` no está exportada en esta terminal. |
+| `COSMOSYS_ENV_FILE does not exist` | 5, 8, 9 | La variable apunta a un fichero que no existe. Revisa la ruta (absoluta). |
+| `Missing trackers (the .csys import will refuse their items): ...` | 6.1 | Falta en la instancia nueva un tracker con ítems en la antigua. Créalo (paso 5.3) y repite el 6.1. |
+| `BLOCKING: Required trackers are unavailable: ...` | 6.2 | Lo mismo, visto por el preflight. No se ha escrito nada: crea el tracker (paso 5.3) y repite ese paquete. |
+| `BLOCKING: Destination project identifiers are already used: ...` | 6.2 | La instancia nueva ya tiene un proyecto con ese identificador. Si es porque ese paquete ya se importó, pasa al siguiente: cada paquete se importa una sola vez. Si no, la instancia no estaba recién creada: empieza de nuevo desde el paso 5. |
+| `Validation failed: Relation type is invalid` después de `Preflight passed` | 6.2 | El paquete tiene relaciones PORIS, que no se pueden migrar todavía (ver "Qué hace y qué no"). Ese paquete no ha escrito nada. Para y pregunta. |
+| `projects not imported yet` | 6.3, 6.4 | Falta importar algún `.csys` (paso 6.2). |
+| `journals already exist on the imported items` | 6.3 | Alguien ha trabajado en la instancia nueva antes de importar el historial. Empieza de nuevo desde el paso 5. |
+| `active webhooks exist` | 6.3 | Desactiva los webhooks de la instancia nueva durante la importación. |
+| `verification failed, nothing was written` | 6.3 | El historial no se ha importado. La lista dice qué no cuadra; pide ayuda con ella y con los títulos de `report.md`. |
+| `WARNING: the importer dropped N records that the conversion report does not announce` | 6.3 | El importador ha descartado algo que la conversión no anunciaba: el paso 7.2 lo contará como fallo. Los registros están en `dropped` del informe de importación; pide ayuda con sus recuentos (`dropped_counts`) antes de abrir. |
+| `WARNING: jobs queued during the import` | 6 | Algo se encoló durante la importación; la línea dice qué. Comprueba que la instancia no tiene correo configurado (paso 5.2) y pregunta antes de abrir. |
+| `the tags package does not verify` | 6.4 | El `.cstags` está dañado, o en `/tmp/sg/pkg` no están exactamente el `.cshistory` y todos los `.csys` de la misma conversión (`not the ones this tags package was converted with`). Vuelve a copiar los paquetes de `migracion/convertido/` (paso 5.4) y quita cualquier otro. |
+| `the tags package is not importable` | 6.4 | La conversión encontró etiquetas que el plugin nuevo no puede guardar igual (`tags_blocking` en `report.md`, paso 4). No se puede seguir sin decidir qué hacer con ellas; pide ayuda con los títulos de `report.md`. |
+| `the tag plugin is not ready in this instance` | 6.4 | La instancia nueva no tiene el conjunto `tags`, o sus migraciones no se han aplicado. Créala con `COSMOSYS_PLUGINS=tags` (paso 5.1). |
+| `the tag tables are not the ones this importer knows` | 6.4 | El plugin de etiquetas de la instancia nueva no es el que este procedimiento conoce (`additional_tags` 4.6). No se ha escrito nada; pide ayuda con el mensaje. |
+| `the history is not imported yet` | 6.4 | Las etiquetas van después del historial (paso 6.3). |
+| `the history in this instance is not the one of this history package` | 6.4 | Los cambios de etiquetas del historial de la instancia nueva no son los del `.cshistory` que hay junto al `.cstags`: el historial se importó de otra conversión, o alguien ha editado ítems. No se ha escrito nada. Empieza de nuevo desde el paso 5 con los paquetes de una sola conversión. |
+| `objects of the package that are not exactly one object here` | 6.4 | Falta importar algún `.csys`, o un ítem o una página del paquete no está en la instancia nueva (o está más de una vez). No se ha escrito nada; pide ayuda con el mensaje. |
+| `conflicts with tags that already exist in this instance` | 6.4 | La instancia nueva ya tenía etiquetas que no son las del paquete en los mismos ítems, o con el mismo nombre y otras fechas, o que solo se distinguen por las mayúsculas. Alguien ha trabajado en ella: empieza de nuevo desde el paso 5. |
+| `verification failed, nothing was written` (en `tags`) | 6.4 | Lo escrito no coincide con el paquete o ha cambiado algo más. Las etiquetas no se han importado. La lista nombra ítems y etiquetas por número y huella, sin nombres; pide ayuda con ella. |
+| `regenerate both extracts with history_text.rb v2` | 7.2 | La referencia del paso 3.2 se tomó con otra revisión de `snapshots_gen`. Usa la misma en los dos servidores y vuelve a tomar la referencia (la instancia antigua sigue congelada). |
+| `use a real import report, not a dry run` | 7.2 | `INFORME` apunta al informe del ensayo. Vuelve a definirlo con la orden del paso 7.2. |
+| `Failures (N)` o `Unexplained differences (N)` distintos de 0 | 7.2 | No abras la instancia. Mira el detalle en privado con `--details` o `--show CSID` y pide ayuda con los recuentos de cada grupo, sin el texto de los ítems. |
+| `Failures (N)` distinto de 0 | 7.3 | No abras la instancia. Cada línea empieza por el tipo de diferencia (por ejemplo, `object_coverage`) y lleva huellas, no nombres: pide ayuda con esas líneas. |
