@@ -134,8 +134,13 @@ module SnapshotsGen
         summary
       end
 
+      # The history-import-*.json report. Everything in "dropped" was in the
+      # history package, so the conversion report did not announce it.
       def summary
-        { 'stats' => @stats.sort.to_h, 'dropped' => @dropped, 'log' => @log }
+        { 'format' => 'snapshots_gen-history-import-v1', 'dry_run' => @options['dry_run'] ? true : false,
+          'stats' => @stats.sort.to_h, 'dropped' => @dropped,
+          'dropped_counts' => @dropped.group_by { |entry| entry['kind'] }.transform_values(&:length).sort.to_h,
+          'log' => @log }
       end
 
       private
@@ -316,6 +321,7 @@ module SnapshotsGen
       def resolve_items!
         @item_map = {}
         @issue_key = {}
+        @csid_by_key = {}
         missing = []
         rows = @package.rows('items')
         by_project = Issue.where(project_id: @project_map.values).pluck(:project_id, :csid, :id)
@@ -324,6 +330,7 @@ module SnapshotsGen
           id = by_project.fetch(@project_map.fetch(row['project_id']), {})[row['csid'].to_s.downcase]
           id ? @item_map[row['key']] = id : missing << "#{row['key']} (#{row['csid']})"
           @issue_key[row['id']] = row['key'] if row['id'].to_i.positive?
+          @csid_by_key[row['key']] = row['csid']
         end
         raise Error, "items not found in the new instance: #{missing.first(20).join(', ')}" if missing.any?
       end
@@ -488,10 +495,12 @@ module SnapshotsGen
         @detail_count = 0
         @package.rows('journals').sort_by { |row| [row['created_on'].to_s, row['id']] }.each do |row|
           issue_id = @item_map.fetch(row['item_key'])
-          translated = Array(details[row['id']]).sort_by { |detail| detail['id'] }.filter_map { |detail| translate(detail, issue_id) }
+          translated = Array(details[row['id']]).sort_by { |detail| detail['id'] }.filter_map do |detail|
+            translate(detail, issue_id, row)
+          end
           notes = placeholders(row['notes'].to_s)
           if notes.strip.empty? && translated.empty?
-            @dropped << { 'kind' => 'journal', 'id' => row['id'], 'reason' => 'no detail could be translated' }
+            @dropped << journal_entry('journal', row['id'], row, 'no detail could be translated')
             next
           end
           created = time(row['created_on'])
@@ -508,27 +517,37 @@ module SnapshotsGen
         @stats['journal_details'] = @detail_count
       end
 
-      def translate(detail, issue_id)
+      def translate(detail, issue_id, journal)
         prop_key = detail['prop_key'].to_s
         case detail['prop_ref']
         when 'attachments'
           prop_key = @attachment_map[prop_key.to_i]&.to_s || '0'
         when 'custom_fields'
           prop_key = @field_map[prop_key.to_i]&.to_s
-          return drop_detail(detail, 'custom field not created') unless prop_key
+          return drop_detail(detail, journal, 'custom field not created') unless prop_key
         end
         old_value = reference(detail['value_ref'], detail['old_value'], issue_id)
         value = reference(detail['value_ref'], detail['value'], issue_id)
-        return drop_detail(detail, "#{detail['value_ref']} #{detail['old_value'] || detail['value']} not found") if old_value == :missing || value == :missing
+        if old_value == :missing || value == :missing
+          missing = old_value == :missing ? detail['old_value'] : detail['value']
+          return drop_detail(detail, journal, "#{detail['value_ref']} #{missing} not found")
+        end
 
         { 'property' => detail['property'], 'prop_key' => prop_key,
           'old_value' => detail['value_ref'] ? old_value : placeholders(old_value),
           'value' => detail['value_ref'] ? value : placeholders(value) }
       end
 
-      def drop_detail(detail, reason)
-        @dropped << { 'kind' => 'journal_detail', 'id' => detail['id'], 'reason' => reason }
+      def drop_detail(detail, journal, reason)
+        @dropped << journal_entry('journal_detail', detail['id'], journal, reason)
         nil
+      end
+
+      # A dropped journal or detail, named by its source ids and the CSID of
+      # its item in the new instance.
+      def journal_entry(kind, id, journal, reason)
+        { 'kind' => kind, 'id' => id, 'reason' => reason, 'journal' => journal['id'], 'item' => journal['item_key'],
+          'csid' => @csid_by_key[journal['item_key']] }
       end
 
       # Translates one referenced value; :missing when it cannot be found.

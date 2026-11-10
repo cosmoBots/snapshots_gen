@@ -214,7 +214,7 @@ Si termina en `Dry run: everything was rolled back.`, impórtalo de verdad:
 importar history /tmp/sg/pkg/<nombre>.cshistory
 ```
 
-Todo ocurre en una sola transacción: o queda todo importado y verificado, o no queda nada. Al final dice cuántos journals, versiones de wiki, entradas de tiempo, observadores y membresías ha escrito, y deja un informe en `/tmp/sg/pkg/history-import-<fecha>.json` con lo que no pudo traducir. Cópialo:
+Todo ocurre en una sola transacción: o queda todo importado y verificado, o no queda nada. Al final dice cuántos journals, versiones de wiki, entradas de tiempo, observadores y membresías ha escrito, y deja un informe en `/tmp/sg/pkg/history-import-<fecha>.json` con lo que no pudo traducir. Lo que la conversión ya quitó está en su informe y no llega al importador, así que cualquier cosa que el importador descarte es algo que el informe de conversión no anunciaba: la última línea lo dice (`Dropped by the importer: none` o un `WARNING: the importer dropped N records that the conversion report does not announce`). En el JSON (formato `snapshots_gen-history-import-v1`), `dropped` lista cada registro con `kind`, `id` (en el origen) y `reason`, y los journals y cambios llevan además `journal` (el journal de origen), `item` y `csid` (el CSID del ítem en la instancia nueva); `dropped_counts` los cuenta por tipo. Cópialo:
 
 ```sh
 docker cp <contenedor-nuevo>:/tmp/sg/pkg/. migracion/importado

@@ -42,7 +42,7 @@ module SnapshotsGen
         report = File.join(File.dirname(File.expand_path(path)), "history-import-#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}.json")
         File.write(report, JSON.pretty_generate(summary) + "\n")
         puts "Statistics: #{summary['stats'].map { |key, value| "#{key}=#{value}" }.join(', ')}"
-        puts "Dropped: #{summary['dropped'].length} (see #{report})"
+        print_dropped(summary, report)
       else
         warn 'usage: import.rb prepare|history HISTORY.cshistory [options] | csys PACKAGE.csys [parent=IDENTIFIER] [confirm=yes]'
         exit 2
@@ -50,6 +50,18 @@ module SnapshotsGen
     rescue Error => error
       warn "error: #{error.message}"
       exit 1
+    end
+
+    # Whatever the importer drops was in the history package: the conversion
+    # report did not announce it, so it is said apart, at the very end.
+    def print_dropped(summary, report)
+      if summary['dropped'].empty?
+        puts "Dropped by the importer: none (report: #{report})."
+        return
+      end
+      counts = summary['dropped_counts'].map { |kind, count| "#{kind} #{count}" }.join(', ')
+      puts "WARNING: the importer dropped #{summary['dropped'].length} records that the conversion report " \
+           "does not announce (#{counts}). They are listed under \"dropped\" in #{report}."
     end
 
     def admin
