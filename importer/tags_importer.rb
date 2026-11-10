@@ -468,7 +468,8 @@ module SnapshotsGen
             next unless target['type'] == 'Issue'
 
             item = items[target['item_key']]
-            unless item && item['csid'] == target['csid'] && identifiers[item['project_id']] == target['project_identifier']
+            unless item && item['id'] == row['source_id'] && item['csid'] == target['csid'] &&
+                   identifiers[item['project_id']] == target['project_identifier']
               problems << "#{object_id}: the history package does not have this item with the same project and CSID"
               next
             end

@@ -216,6 +216,52 @@ class ConverterTagsTest < Minitest::Test
     end
   end
 
+  # R3 of the adversarial review: the targets are bound to the sibling
+  # history by source id, so swapped targets do not verify.
+  def test_verifier_binds_objects_to_the_history_by_source_id
+    tables = tag_tables([tag(1, 'one', 2)], [tagging(1, 1, 'Issue', 1), tagging(2, 1, 'WikiPage', 1)])
+    convert(tables) do |package, _summary, _report, _path, history, csys|
+      Dir.mktmpdir('cstags-swap') do |tmp|
+        content = package.content.reject { |key, _value| %w[profile files counts].include?(key) }
+        forge = lambda do |label|
+          rows = Marshal.load(Marshal.dump(package.rows))
+          [rows, File.join(tmp, "#{label}.cstags")]
+        end
+        check = lambda do |label, expected, &mutate|
+          rows, path = forge.call(label)
+          mutate.call(rows)
+          TP.write(path, content: content, rows: rows)
+          errors = TP::Verifier.new(path).verify(history: history, csys: csys).errors
+          assert(errors.any? { |error| error.include?(expected) }, "#{label}: #{errors.inspect}")
+        end
+        swap = lambda do |rows, first, second|
+          a, b = [first, second].map { |id| rows['objects'].find { |row| row['id'] == id } }
+          a['target'], b['target'] = b['target'], a['target']
+        end
+        check.call('issues', 'Issue:1 does not match the history') { |rows| swap.call(rows, 'Issue:1', 'Issue:2') }
+        check.call('wiki', 'WikiPage:1 does not match the history') { |rows| swap.call(rows, 'WikiPage:1', 'WikiPage:2') }
+        check.call('csid', 'Issue:2 does not match the history') do |rows|
+          rows['objects'].find { |row| row['id'] == 'Issue:2' }['target']['csid'] = 'ALP-0099'
+        end
+        check.call('duplicate', 'objects repeat a source type and id') do |rows|
+          rows['objects'].find { |row| row['id'] == 'Issue:2' }['source_id'] = 1
+        end
+        check.call('id', 'object Issue:2 has an id that is not its source type and id') do |rows|
+          rows['objects'].find { |row| row['id'] == 'Issue:2' }['source_id'] = 3
+        end
+        check.call('unsupported', 'object unsupported:1 is unsupported without the reason unsupported_type') do |rows|
+          rows['objects'] << { 'id' => 'unsupported:1', 'source_type' => 'Issue', 'source_id' => nil, 'source_order' => nil, 'target' => nil,
+                               'untargeted_reason' => 'not_in_source' }
+        end
+        # Without the history only the package itself is checked.
+        rows, path = forge.call('alone')
+        swap.call(rows, 'Issue:1', 'Issue:2')
+        TP.write(path, content: content, rows: rows)
+        assert TP::Verifier.new(path).verify.ok?
+      end
+    end
+  end
+
   def test_verifier_rejects_forged_roles
     convert(tag_tables([tag(1, 'one', 1)], [tagging(1, 1, 'Issue', 1)])) do |package|
       Dir.mktmpdir('cstags-roles') do |tmp|

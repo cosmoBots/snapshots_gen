@@ -311,7 +311,7 @@ module SnapshotsGen
         check_counts(manifest.fetch('content'), rows)
         check_source(manifest.fetch('content').fetch('source'))
         check_profile(manifest.fetch('content'), rows) if manifest.dig('content', 'importable') == true
-        check_dependencies(manifest.fetch('content').fetch('dependencies'), history, csys)
+        check_dependencies(manifest.fetch('content').fetch('dependencies'), history, csys, rows.fetch('objects'))
         Result.new(@errors, manifest, @errors.empty? ? rows : nil)
       rescue Zip::Error, JSON::ParserError, SystemCallError, Error, KeyError, TypeError, NoMethodError, ArgumentError => error
         Result.new(@errors + ["malformed package: #{error.class}: #{error.message}"], nil, nil)
@@ -461,6 +461,15 @@ module SnapshotsGen
         objects = rows.fetch('objects')
         ids = objects.map { |row| row['id'] }
         @errors << 'objects repeat an id' unless ids.uniq.length == ids.length
+        pairs = objects.map { |row| [row['source_type'], row['source_id']] }
+        @errors << 'objects repeat a source type and id' unless pairs.uniq.length == pairs.length
+        objects.each do |row|
+          if row['id'].to_s.start_with?('unsupported:')
+            @errors << "object #{row['id']} is unsupported without the reason unsupported_type" unless row['untargeted_reason'] == 'unsupported_type'
+          elsif row['id'] != "#{row['source_type']}:#{row['source_id']}"
+            @errors << "object #{row['id']} has an id that is not its source type and id"
+          end
+        end
         @errors << 'objects are out of order' unless objects == objects.sort_by { |row| TagsPackage.object_sort_key(row) }
         objects.each { |row| check_object(row) }
         known = ids.to_set
@@ -487,6 +496,28 @@ module SnapshotsGen
         valid = permissions.nil? || (permissions.is_a?(Array) && permissions == permissions.uniq.sort &&
                                      permissions.all? { |permission| TAG_PERMISSIONS.include?(permission) })
         @errors << "#{location} has tag_permissions that are not a sorted list of tag permissions" unless valid
+      end
+
+      # Every object with a target is the item or wiki page of the history
+      # with the same source id, and the target says what that row says: an
+      # item by key, project and CSID, a page by project and exact title.
+      def check_history_identities(history, manifest, objects)
+        tables = %w[projects items wiki_pages].to_h do |name|
+          entry = manifest.dig('content', 'tables').find { |table| table['name'] == name }
+          rows = entry ? Zip::File.open(history) { |zip| zip.read(entry.fetch('path')) }.force_encoding(Encoding::UTF_8).lines.map { |line| JSON.parse(line) } : []
+          [name, rows.group_by { |row| row['id'] }]
+        end
+        projects = tables.fetch('projects').transform_values { |rows| rows.length == 1 ? rows.first['identifier'] : nil }
+        objects.each do |row|
+          target = row['target']
+          next unless target.is_a?(Hash)
+
+          found = tables.fetch(row['source_type'] == 'Issue' ? 'items' : 'wiki_pages').fetch(row['source_id'], [])
+          source = found.first if found.length == 1
+          same = source && projects[source['project_id']] == target['project_identifier'] &&
+                 (row['source_type'] == 'Issue' ? source['key'] == target['item_key'] && source['csid'] == target['csid'] : source['title'] == target['title'])
+          @errors << "object #{row['id']} does not match the history (#{row['source_type'] == 'Issue' ? 'item' : 'wiki page'} with the same source id)" unless same
+        end
       end
 
       def check_object(row)
@@ -574,7 +605,7 @@ module SnapshotsGen
         problems.uniq.each { |problem| @errors << "importable package breaks the strict profile: #{problem}" }
       end
 
-      def check_dependencies(dependencies, history, csys)
+      def check_dependencies(dependencies, history, csys, objects)
         @errors << "dependencies has keys #{dependencies.keys.sort.inspect}" unless dependencies.keys.sort == DEPENDENCY_KEYS
         if history
           result = LegacySnapshot::Verifier.new(history).verify
@@ -583,6 +614,8 @@ module SnapshotsGen
           elsif result.manifest['content_sha256'] != dependencies['history_content_sha256'] ||
                 Digest::SHA256.file(history).hexdigest != dependencies['history_sha256']
             @errors << 'the history package is not the one this tags package was converted with'
+          else
+            check_history_identities(history, result.manifest, objects)
           end
         end
         return unless csys
