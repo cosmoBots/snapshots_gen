@@ -772,7 +772,8 @@ module SnapshotsGen
         never.each { |text| report.add('history_never_recorded', text) }
         source.content.fetch('tables').each do |table|
           name = table.fetch('name')
-          next if Rules::REDMINE_TABLES.include?(name) || Rules::COSMOSYS_TABLES.include?(name) || table.fetch('rows').zero?
+          next if Rules::REDMINE_TABLES.include?(name) || Rules::COSMOSYS_TABLES.include?(name) ||
+                  Rules::TAG_TABLES.include?(name) || table.fetch('rows').zero?
 
           report.add('plugin_data_not_migrated', name, rows: table.fetch('rows'))
         end

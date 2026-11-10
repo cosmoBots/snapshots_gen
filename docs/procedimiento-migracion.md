@@ -59,6 +59,8 @@ El historial sigue a los campos: un cambio antiguo de `rqLevel` se ve como cambi
 - Los CSID se conservan, también los que tienen el prefijo de otro proyecto porque el ítem se movió. Solo se renumera un ítem sin CSID o con uno repetido en su árbol.
 - En los modelos PORIS, una relación "bloquea" va al revés que antes: el modo bloquea lo que incluye (sus submodos y sus valores). La conversión invierte esas relaciones y sus cambios en el historial.
 
+**Etiquetas:** la conversión las deja en `<nombre>.cstags` tal como están en la instancia antigua, sin tocar ningún nombre: no quita espacios, no cambia mayúsculas ni acentos y no parte en las comas (`A,B` es una sola etiqueta; `A` y `a` son dos). Los ítems se identifican por su proyecto y su CSID final (el renumerado, si lo fue) y las páginas de wiki por su proyecto y su título. El orden de las etiquetas de cada ítem no se conserva: el plugin nuevo siempre las muestra por nombre. El plugin nuevo no tiene contexto ni autor de cada etiquetado, así que solo se pueden importar los etiquetados de contexto `tags` sin autor; cualquier otro caso, igual que un nombre que el plugin nuevo cambiaría (espacios al principio o al final, más de 255 caracteres), una etiqueta repetida o un ítem `AD n`/`RD n`/`CD n` etiquetado, deja el `.cstags` como no importable y el informe lo cuenta en `Blocking`. Los cambios de etiquetas del historial se conservan literalmente. El formato está en [cstags-format.md](cstags-format.md).
+
 **Personas:** los usuarios se emparejan por login. Si ya existían en la instancia nueva (como `admin`), conservan su contraseña y toman el nombre de origen. Si no, se crean con su contraseña de siempre. El asignado de cada ítem llega con el historial (paso 6.3), porque Redmine solo deja asignar a miembros del proyecto.
 
 ## Qué hace falta
@@ -137,12 +139,13 @@ Deja en `migracion/convertido/`:
 
 - un `.csys` por cada proyecto raíz de la instancia antigua (`<nombre>-<identificador>.csys`), con sus subproyectos;
 - `<nombre>.cshistory`, el paquete de historial y usuarios;
+- `<nombre>.cstags`, el paquete de etiquetas de toda la instancia (también las que no usa ningún ítem), ligado a los `.csys` y al `.cshistory` de esta misma conversión;
 - `report.md` y `report.json`, el informe de conversión.
 
 **Lee `report.md` antes de seguir.** Está ordenado por gravedad:
 
-- `Blocking`: no se puede seguir. La orden termina con código 1.
-- `Warning`: algo se pierde o se adapta y conviene saberlo: adjuntos sin fichero, referencias `#id` a ítems que no existen, cambios del historial que no se pueden traducir, tablas Markdown ambiguas.
+- `Blocking`: no se puede seguir. La orden termina con código 1. Un `.cstags` no importable también es `Blocking` (`tags_blocking`, con el número de casos por código); el `.cstags` se escribe igualmente, para diagnosticarlo.
+- `Warning`: algo se pierde o se adapta y conviene saberlo: adjuntos sin fichero, referencias `#id` a ítems que no existen, cambios del historial que no se pueden traducir, tablas Markdown ambiguas. En `tags_warning`, lo que hay que revisar de las etiquetas antes de entregar: etiquetas desactivadas en los ajustes, etiquetas sin uso (el plugin nuevo las borra tras cualquier edición) o nombres que solo difieren en mayúsculas.
 - `Transformation`: lo que la conversión cambia a propósito, por ejemplo los estados `rqDraft` a `Draft`, los campos `rq*` a los campos nativos, los ítems `AD n`/`RD n`/`CD n` a documentos o los CSID renumerados.
 - `Information`: lo que no se puede recuperar porque nunca se guardó, los usuarios cuyo 2FA se reinicia y los roles de las membresías.
 

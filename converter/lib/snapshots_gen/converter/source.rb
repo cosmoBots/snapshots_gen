@@ -75,6 +75,19 @@ module SnapshotsGen
         end
       end
 
+      # Rows of a table exactly as the package encodes them ($base64 objects
+      # stay as they are), for evidence that must not be reinterpreted.
+      def raw_table(name)
+        entry = content.fetch('tables').find { |table| table.fetch('name') == name }
+        return [] unless entry
+
+        File.foreach(File.join(directory, entry.fetch('path')), encoding: 'UTF-8').map { |line| JSON.parse(line) }
+      end
+
+      def table_entry(name)
+        content.fetch('tables').find { |table| table.fetch('name') == name }
+      end
+
       def report_rows(name)
         entry = content.fetch('reports').find { |report| report.fetch('name') == name }
         return [] unless entry

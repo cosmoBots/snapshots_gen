@@ -105,6 +105,8 @@ module SnapshotsGen
         user_preferences users versions watchers wiki_content_versions wiki_contents wiki_pages wiki_redirects wikis
         workflows
       ].freeze
+      # Tables of the old tag plugin (additional_tags), carried by the .cstags.
+      TAG_TABLES = %w[additional_tags additional_taggings].freeze
       COSMOSYS_TABLES = %w[
         cosmosys_issues cosmosys_projects cosmosys_trackers cosmosys_users cosmosys_versions cosmosys_documents
         cosmosys_project_gits csys_reqs csys_poris
