@@ -121,7 +121,7 @@ docker cp <contenedor-antiguo>:/tmp/snapshots_gen-out migracion/exportado
 docker exec -u 0 <contenedor-antiguo> rm -rf /tmp/snapshots_gen-exporter /tmp/snapshots_gen-out
 ```
 
-`<nombre>` es una etiqueta corta para la instancia, con letras, números, `-` o `_` (por ejemplo, `est`). El exportador lee todo en una sola transacción de solo lectura, copia los adjuntos, comprueba que los recuentos no han cambiado mientras leía y verifica el paquete antes de terminar. Al final dice:
+`<nombre>` es una etiqueta corta para la instancia, con letras, números, `-` o `_` (por ejemplo, `antigua`). El exportador lee todo en una sola transacción de solo lectura, copia los adjuntos, comprueba que los recuentos no han cambiado mientras leía y verifica el paquete antes de terminar. Al final dice:
 
 ```text
 Captured N tables, N rows, N attachment rows.
