@@ -375,34 +375,99 @@ Deja en `migracion/convertido/`:
 
 ## 5. Crear la instancia nueva
 
-Crea una instancia nueva y vacía con `cosmoSys_deploy` (`main`), siguiendo su README:
+En el servidor nuevo, con `cosmoSys_deploy` (antes, comprueba su pin como dice "Versiones con las que se ha ensayado"). La instancia se crea con su propio fichero de entorno y su propio nombre de proyecto Compose, así que no toca ninguna otra instancia que ya corra en el servidor. Se crea cerrada: solo escucha en `127.0.0.1` del servidor y no se publica hasta el paso 8.
 
-- variante `requirements` si la instancia antigua tenía requisitos (tracker `rq`);
-- el conjunto opcional `poris` si el inventario muestra ítems de los trackers `pr*`: trae `prSys`, `prParam`, `prMode`, `prValue` y `prCmd`, y la conversión lleva `prValFloat` y `prValText` a `prValue`;
-- el conjunto opcional `tags` (`COSMOSYS_PLUGINS=tags`, o `poris,tags`): instala los plugins de etiquetas. Sin él, el paso 6.4 se niega a importar las etiquetas;
-- un administrador propio (`COSMOSYS_INITIAL_ADMIN_PASSWORD`). Si en la instancia antigua había un usuario `admin`, se empareja con este y se queda con la contraseña nueva.
-
-No la publiques todavía y no dejes entrar a nadie. En el resto del documento, `<contenedor-nuevo>` es su contenedor de Redmine (`<proyecto>-redmine-1`).
-
-Si la instancia antigua tenía trackers fuera de cosmoSys con ítems (paso 1), créalos ahora con el mismo nombre (Administración, Tipos de petición), o la importación del paso 6 se negará a importar sus ítems.
-
-Copia en el contenedor el importador y los paquetes:
+### 5.1. El fichero de entorno
 
 ```sh
-docker exec -u 0 <contenedor-nuevo> mkdir -p /tmp/sg/pkg
-docker cp snapshots_gen/exporter <contenedor-nuevo>:/tmp/sg/exporter
-docker cp snapshots_gen/importer <contenedor-nuevo>:/tmp/sg/importer
-docker cp snapshots_gen/converter <contenedor-nuevo>:/tmp/sg/converter
-for f in migracion/convertido/*.csys migracion/convertido/*.cshistory migracion/convertido/*.cstags; do docker cp "$f" <contenedor-nuevo>:/tmp/sg/pkg/; done
-docker exec -u 0 <contenedor-nuevo> chown -R redmine:redmine /tmp/sg
+mkdir -p -m 700 "$(dirname "$COSMOSYS_ENV_FILE")"
+install -m 600 "$DEPLOY/.env.example" "$COSMOSYS_ENV_FILE"
+openssl rand -hex 32
+openssl rand -hex 64
 ```
 
-`/tmp/sg/pkg` tiene que quedar con todos los `.csys`, el `.cshistory` y el `.cstags` de la misma conversión y con ningún otro: el paso 6.4 comprueba que son exactamente los que se convirtieron juntos. El directorio `converter` hace falta porque en él está el lector del `.cstags`.
+Edita `$COSMOSYS_ENV_FILE` y deja estas líneas con estos valores (las que ya están se cambian y las que no, se añaden):
+
+```dotenv
+COMPOSE_PROJECT_NAME=<nombre del proyecto Compose, por ejemplo cosmosys_migrada>
+POSTGRES_PASSWORD=<la primera cadena de openssl>
+REDMINE_SECRET_KEY_BASE=<la segunda cadena de openssl>
+COSMOSYS_INITIAL_ADMIN_PASSWORD=<una contraseña fuerte para admin>
+COSMOSYS_VARIANT=requirements
+COSMOSYS_PLUGINS=tags
+COSMOSYS_BIND_ADDRESS=127.0.0.1
+COSMOSYS_HTTP_PORT=<un puerto libre del servidor, por ejemplo 3000>
+COSMOSYS_SESSION_COOKIE_KEY=<un nombre propio, por ejemplo _cosmosys_migrada_session>
+REDMINE_LANG=en
+```
+
+- `COMPOSE_PROJECT_NAME` da nombre a los contenedores y a los volúmenes de la instancia (`<proyecto>-redmine-1`, `<proyecto>_database`...): letras minúsculas, números, `_` o `-`, y distinto del de cualquier otra instancia del servidor.
+- `COSMOSYS_VARIANT=requirements` añade cosmoSys Requirements, que hace falta si la instancia antigua tenía requisitos (tracker `rq`), que es lo normal.
+- `COSMOSYS_PLUGINS=tags` es obligatorio: instala los plugins de etiquetas. Sin él, el paso 6.4 se niega a importarlas (`the tag plugin is not ready in this instance`). Otros conjuntos del deploy se pueden activar después con `scripts/update-instance.sh --plugins` (ver su README); la migración solo se ha ensayado con `tags`.
+- `COSMOSYS_BIND_ADDRESS=127.0.0.1` deja la instancia cerrada mientras se migra. El paso 8.2 la cambia según cómo se publique.
+- `COSMOSYS_SESSION_COOKIE_KEY` con un nombre propio evita que el navegador mezcle la sesión de esta instancia con la de la antigua o la de otra instancia en el mismo nombre de host.
+- `REDMINE_LANG=en`, como viene en `.env.example`, es lo ensayado. Con otro idioma, Redmine crea sus trackers, estados y roles de serie con los nombres traducidos, y el reparto de roles del paso 6 (`rqWriter` a `Developer`...) no los encuentra. Cada usuario elige luego su idioma en "Mi cuenta", y el idioma por defecto se cambia en Administración, Configuración, Visualización.
+- `COSMOSYS_INITIAL_ADMIN_PASSWORD` es la contraseña del usuario `admin`. Solo se aplica en el primer arranque, mientras `admin` conserva la contraseña de fábrica. Si en la instancia antigua había un usuario `admin`, el paso 6.1 lo empareja con este, que conserva la contraseña nueva.
+- No añadas `COSMOSYS_PROXY_MODE` ni `COSMOSYS_HOSTNAME` todavía (el proxy del deploy publicaría la instancia en cuanto arrancara), ni ninguna configuración de correo.
+
+### 5.2. Construir y arrancar
+
+Desde el directorio de trabajo:
+
+```sh
+(cd "$DEPLOY" && ./scripts/compose.sh build)
+(cd "$DEPLOY" && ./scripts/compose.sh up -d --wait)
+NUEVO=$(cd "$DEPLOY" && ./scripts/compose.sh ps -q redmine); echo "$NUEVO"
+```
+
+La construcción descarga y compila cosmoSys y sus plugins (necesita salida a GitHub, Docker Hub y rubygems); la primera vez tarda bastante más que las siguientes. `up --wait` termina cuando la instancia está sana: en el ensayo, 75 s. `NUEVO` es el identificador del contenedor de Redmine de la instancia, y el `echo` tiene que imprimirlo. Comprueba que es la instancia que toca:
+
+```sh
+docker inspect --format '{{index .Config.Labels "eu.cosmobots.cosmosys.revision"}}' "$NUEVO"
+docker exec "$NUEVO" printenv COSMOSYS_PLUGINS
+docker exec "$NUEVO" ls /usr/src/redmine/plugins
+docker exec "$NUEVO" sh -c 'grep -s email_delivery /usr/src/redmine/config/configuration.yml || echo "sin correo"'
+```
+
+La primera tiene que dar `4d9e1c7e6d3ebf97c76590162fb1b19dd29f1338` (cosmoSys 0.2.10), la segunda `tags`, la tercera tiene que incluir `additionals`, `additional_tags`, `cosmosys` y `cosmosys_req`, y la última `sin correo`.
+
+Para ver la instancia sin publicarla, abre un túnel SSH desde tu equipo y entra con el navegador en `http://localhost:8080` como `admin`, con la contraseña de `COSMOSYS_INITIAL_ADMIN_PASSWORD`:
+
+```sh
+ssh -N -L 8080:127.0.0.1:<COSMOSYS_HTTP_PORT> <usuario>@<servidor-nuevo>
+```
+
+Tiene que tener solo los dos proyectos de ayuda que trae toda instancia nueva. No dejes entrar a nadie más hasta el paso 8.
+
+### 5.3. Crear los trackers que no son de cosmoSys
+
+Si el inventario del paso 1 mostraba ítems de trackers que no son de cosmoSys, créalos ahora con el mismo nombre exacto, mayúsculas y espacios incluidos. La instancia nueva trae de serie `Bug`, `Feature` y `Support`; los demás (por ejemplo `Test Case` o `Task`) hay que crearlos. En Administration, Trackers, New tracker (Administración, Tipos de petición, Nuevo tipo de petición):
+
+- Name: el nombre exacto de la instancia antigua.
+- Default status: `New`.
+- Copy workflow from: `Bug`, para que tenga un flujo de trabajo.
+
+Sin estado por defecto o sin flujo de trabajo, Redmine no deja usar el tracker. Si falta alguno, el paso 6.1 lo dice (`Missing trackers (the .csys import will refuse their items): ...`) y el preflight del 6.2 se niega sin escribir nada; se crea entonces y se repite ese paso.
+
+### 5.4. Copiar el importador y los paquetes al contenedor
+
+```sh
+docker exec -u 0 "$NUEVO" install -d -m 700 /tmp/sg /tmp/sg/pkg
+docker cp snapshots_gen/exporter "$NUEVO":/tmp/sg/exporter
+docker cp snapshots_gen/importer "$NUEVO":/tmp/sg/importer
+docker cp snapshots_gen/converter "$NUEVO":/tmp/sg/converter
+docker cp snapshots_gen/test/history_text.rb "$NUEVO":/tmp/sg/history_text.rb
+docker cp snapshots_gen/test/tags "$NUEVO":/tmp/sg/tags
+for f in migracion/convertido/*.csys migracion/convertido/*.cshistory migracion/convertido/*.cstags; do docker cp "$f" "$NUEVO":/tmp/sg/pkg/; done
+docker exec -u 0 "$NUEVO" chown -R redmine:redmine /tmp/sg
+```
+
+`/tmp/sg/pkg` tiene que quedar con todos los `.csys`, el `.cshistory` y el `.cstags` de la misma conversión y con ningún otro: el paso 6.4 comprueba que son exactamente los que se convirtieron juntos. El directorio `converter` hace falta porque en él está el lector del `.cstags`, y `history_text.rb` y `tags` son para el paso 7. El `chown` es por lo mismo que en el paso 1.
 
 Para no repetir la orden larga, define:
 
 ```sh
-importar() { docker exec -u redmine -w /usr/src/redmine <contenedor-nuevo> bundle exec rails runner /tmp/sg/importer/import.rb "$@"; }
+importar() { docker exec -u redmine -w /usr/src/redmine "$NUEVO" bundle exec rails runner /tmp/sg/importer/import.rb "$@"; }
 ```
 
 ## 6. Importar
