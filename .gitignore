@@ -1,5 +1,24 @@
 # Packages and working copies hold client data and password hashes: never commit them.
 *.cslegacy
 *.csys
+*.cshistory
+*.cstags
 /work/
 /packages/
+/migracion/
+
+# Reports and comparison extracts of a migration carry client data too.
+inventory-*.json
+history-import-*.json
+tags-import-*.json
+origen.jsonl
+destino.jsonl
+historial-origen.jsonl
+historial-destino.jsonl
+etiquetas-origen.jsonl
+etiquetas-destino.jsonl
+
+# Database dumps and local secrets.
+*.sql
+*.sql.gz
+.env
