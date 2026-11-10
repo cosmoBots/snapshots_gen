@@ -1,15 +1,26 @@
 # Migrar una instancia antigua de cosmoSys
 
-Este procedimiento lleva una instancia antigua de cosmoSys (Redmine 4.2 con los plugins `cosmosys_*`) a una instancia nueva de cosmoSys (Redmine 7), con su historial: notas, cambios, versiones de wiki, tiempo dedicado, observadores, usuarios con su contraseña, autores y fechas, y con sus etiquetas. Está escrito para seguirlo de principio a fin sin ayuda.
+Este procedimiento lleva una instancia antigua de cosmoSys (Redmine 4.2 con los plugins `cosmosys_*`) a una instancia nueva de cosmoSys (Redmine 7, desplegada con `cosmoSys_deploy`), con su historial: notas, cambios, versiones de wiki, tiempo dedicado, observadores, usuarios con su contraseña, autores y fechas, y con sus etiquetas. Está escrito para que lo siga de principio a fin, sin ayuda, alguien que sabe Docker y Linux pero no conoce cosmoSys por dentro.
+
+**Antes de tocar nada, lee [Material sensible](#material-sensible).** Los ficheros que se generan llevan los correos y las contraseñas cifradas de todos los usuarios y todo el contenido de la instancia.
+
+Algunos términos de cosmoSys que salen a menudo:
+
+- Ítem: una petición de Redmine (un requisito, una nota informativa, un capítulo...). Su tipo es el tracker (`rq`, `csInfo`, `csRefDoc`...).
+- CSID: el código legible de cada ítem dentro de su proyecto (por ejemplo, `PRJ-0012`). La migración lo conserva y lo usa para identificar los ítems entre la instancia antigua y la nueva.
+- Journal: cada entrada del historial de un ítem (una nota, un cambio de campos o las dos cosas).
+- Paquete: cada fichero que generan las herramientas de este repositorio. `.cslegacy` es la copia de la instancia antigua; `.csys`, `.cshistory` y `.cstags` son los que se importan en la nueva.
 
 ## Qué hace y qué no
 
-- **La instancia antigua no se toca.** Solo se lee, dentro de una transacción de solo lectura. No se instala nada, no se migra la base de datos y no se reinicia el contenedor. Lo único que se escribe es un directorio temporal dentro del contenedor, que se borra al terminar.
-- **La instancia nueva tiene que estar vacía y cerrada** hasta el final del paso 7. Nadie debe trabajar en ella antes de importar el historial: Redmine usa el orden de las notas en varias funciones, y un historial añadido después quedaría desordenado. El importador se niega si encuentra notas que no sean suyas.
+- **La instancia antigua no se toca.** Solo se lee, dentro de una transacción de solo lectura. No se instala nada, no se migra la base de datos y no se reinicia el contenedor. Lo único que se escribe es un directorio temporal dentro del contenedor, que se borra al terminar el paso 3.
+- **La instancia nueva tiene que estar recién creada y cerrada** hasta el paso 8. Nadie debe trabajar en ella antes de importar el historial: Redmine usa el orden de las notas en varias funciones, y un historial añadido después quedaría desordenado. El importador se niega si encuentra notas que no sean suyas. Una instancia recién creada ya trae dos proyectos de ayuda, `csys_help` y `csys_admin_help`, con unas páginas de wiki; el importador los acepta y no hay que borrarlos.
 - **Lo que no se migra** lo dice el informe de conversión. Entre otras cosas: lo que el cosmoSys antiguo nunca guardó en el historial (los botones de borrar y zombi, mover y reordenar en el árbol, las importaciones ODS y git), las noticias, los foros y los repositorios.
 - **Las etiquetas se migran tal cual** (paso 6.4): las mismas etiquetas, con el mismo nombre exacto, en los mismos ítems y páginas de wiki, con sus fechas, y los cambios de etiquetas en el historial. Cada rol de la instancia nueva recibe los permisos de etiquetas que tenía su rol antiguo, para que quien las veía las siga viendo (solo se añaden permisos, nunca se quitan). Lo que no se conserva es el orden de las etiquetas de cada ítem (el plugin nuevo siempre las ordena por nombre), y el plugin nuevo borra por su cuenta las etiquetas que no usa ningún ítem en cuanto alguien edita un ítem, igual que hacía el antiguo. La importación deja las etiquetas exactas, pero el plugin nuevo trata algunos nombres de otra forma al editar un ítem: parte por la coma un nombre como `A,B` (queda `A` y `B`), funde dos etiquetas del mismo ítem que solo se distinguen por mayúsculas y no deja guardar un ítem con dos etiquetas del mismo grupo `grupo::`. Si la instancia antigua tiene alguno de esos casos, el inventario del paso 1 los cuenta y la conversión los avisa; se decide antes de migrar (por ejemplo, renombrándolos en la instancia antigua).
-- **Los modelos PORIS se migran en parte.** Ya llegan sus ítems, su jerarquía, sus campos personalizados (como campos personalizados) y sus relaciones, con los cambios que cuenta "Qué cambia en la conversión". En una fase posterior sus campos pasarán a los datos propios del perfil `poris` del cosmoSys nuevo y sus proyectos tomarán ese perfil; hasta entonces se importan como proyectos de ítems o de requisitos.
-- **Las contraseñas se conservan**: Redmine 4.2 y 7 las guardan igual. **El 2FA se reinicia**: quien lo usaba tiene que volver a activarlo.
+- **Los modelos PORIS no se pueden migrar todavía.** Es una limitación conocida: la conversión escribe las relaciones "bloquea" entre los ítems PORIS, y el plugin `cosmosys_poris` actual solo acepta "precede", así que el paso 6.2 falla con `Validation failed: Relation type is invalid` en todo paquete que las tenga, aunque su preflight haya dicho `Preflight passed` (no escribe nada de ese paquete). Si el inventario del paso 1 muestra ítems de los trackers `pr*` (`prSys`, `prParam`, `prMode`, `prValFloat`, `prValText`, `prCmd`), no sigas: pregunta antes en las incidencias de este repositorio, sin adjuntar nada de la instancia.
+- **Las contraseñas se conservan**: Redmine 4.2 y 7 las guardan igual. **El 2FA se reinicia**: quien lo usaba tiene que volver a activarlo. Quien entraba por LDAP u otra autenticación externa no tiene contraseña en Redmine y no podrá entrar hasta que un administrador le dé una.
+- **No sale ningún correo.** `cosmoSys_deploy` no configura ningún servidor de correo, y la instancia nueva no debe tener uno hasta que se abra (paso 8). Además, mientras importa, el importador no deja que Redmine encole ninguna notificación: cada orden termina diciendo `Jobs queued: none`. Así nadie recibe miles de avisos de ítems "creados" o "cambiados" por la migración.
+- **Los paquetes de una conversión van juntos.** Todos los `.csys`, el `.cshistory` y el `.cstags` de una misma conversión se importan juntos, y el paso 6.4 lo comprueba. Convertir otra vez el mismo `.cslegacy` da paquetes distintos (no son idénticos byte a byte), así que, si se repite la conversión, se repite también la importación desde una instancia nueva (paso 5).
 
 ## Qué cambia en la conversión
 
@@ -51,14 +62,14 @@ Para otro reparto, añade `roles=rqReviewer:Reporter,...` a `importar history` (
 | `csID`, `csChapter`, `depGrahInReports` | nada: el CSID y el capítulo son nativos, y la marca de informe no tiene equivalente |
 | cualquier otro campo personalizado | el mismo campo, con su definición |
 
-El historial sigue a los campos: un cambio antiguo de `rqLevel` se ve como cambio del nivel de requisito, con los valores nuevos. Hasta que cosmoSys etiquete `csExtCode` y `csWLoad` en el historial (corrección en revisión, cosmoBots/cosmoSys#4), sus cambios, también los que se hagan en la instancia nueva, se leen "Translation missing"; el paso 7 lo avisa sin darlo por fallo.
+El historial sigue a los campos: un cambio antiguo de `rqLevel` se ve como cambio del nivel de requisito, con los valores nuevos.
 
 **Estructura:**
 
 - Los ítems `AD n`, `RD n` y `CD n` pasan a ser documentos del proyecto, con su posición en el catálogo. Si el título trae código, versión y fecha, se extraen.
 - Un requisito o un `csRefDoc` con hijos queda dentro de un capítulo generado, "Group: <título>", porque en el modelo nuevo no pueden tener hijos.
 - Los CSID se conservan, también los que tienen el prefijo de otro proyecto porque el ítem se movió. Solo se renumera un ítem sin CSID o con uno repetido en su árbol.
-- En los modelos PORIS, una relación "bloquea" va al revés que antes: el modo bloquea lo que incluye (sus submodos y sus valores). La conversión invierte esas relaciones y sus cambios en el historial.
+- En los modelos PORIS, una relación "bloquea" va al revés que antes: el modo bloquea lo que incluye (sus submodos y sus valores). La conversión invierte esas relaciones y sus cambios en el historial, pero el plugin `cosmosys_poris` actual no las acepta (ver "Qué hace y qué no").
 
 **Historial que nombra registros borrados:** si un cambio antiguo tiene como valor anterior o nuevo un ítem, estado, tracker, prioridad, categoría, versión o proyecto que se borró en la instancia antigua, la conversión conserva el otro lado y deja ese vacío. Redmine 4.2 ya enseñaba vacíos los estados, las versiones y los demás registros borrados. Un padre borrado lo enseñaba con su número, pero en la instancia nueva ese número sería el de otro ítem, así que también se deja vacío: "Tarea padre cambiado de #120 a #135" pasa a "Item padre establecido a #<nuevo número de 135>". Si no queda ningún lado, el cambio se quita; el journal solo se quita si no le queda ni nota ni otro cambio. Todo queda en el informe de conversión (`history_reference_cleared` y `history_reference_dropped`), con el CSID del ítem y el journal.
 
@@ -66,19 +77,99 @@ El historial sigue a los campos: un cambio antiguo de `rqLevel` se ve como cambi
 
 **Personas:** los usuarios se emparejan por login. Si ya existían en la instancia nueva (como `admin`), conservan su contraseña y toman el nombre de origen. Si no, se crean con su contraseña de siempre. El asignado de cada ítem llega con el historial (paso 6.3), porque Redmine solo deja asignar a miembros del proyecto.
 
-## Qué hace falta
+## Versiones con las que se ha ensayado
 
-- En el servidor antiguo: acceso a `docker` y el nombre del contenedor de la instancia (en este documento, `<contenedor-antiguo>`; en el despliegue antiguo suele ser `csys_rm-<nombre>`).
-- En el servidor nuevo: Docker, un checkout de `cosmoSys_deploy` en `main` y espacio para una instancia nueva.
-- En cualquiera de los dos: este repositorio, `snapshots_gen`, y Docker para el conversor. El repositorio es privado: hace falta acceso a la organización cosmoBots en GitHub para clonarlo.
-- Un sitio seguro para los paquetes. **Llevan los datos de todos los usuarios, con sus correos y sus contraseñas cifradas:** se tratan como una copia de seguridad, no se envían por correo y se borran al terminar (paso 10).
+| Pieza | Versión ensayada |
+| --- | --- |
+| Instancia antigua | Redmine 4.2.10 (Rails 5.2.8.1, Ruby 2.7.8) sobre MySQL 5.7, con `cosmosys_rm`, `cosmosys_req_rm`, `cosmosys_git_rm`, `additionals` 3.0.5.2 y `additional_tags` 1.0.4 (la copia de cosmoBots), en el contenedor del despliegue antiguo de cosmoSys |
+| cosmoSys | 0.2.10 (etiqueta `0.2.10`, commit `4d9e1c7e6d3ebf97c76590162fb1b19dd29f1338`) |
+| cosmoSys Requirements | commit `9de64877b8f1402cad91b586e33f84e28b09179c` (plugin 0.3.5) |
+| Etiquetas en la instancia nueva | `additionals` 4.6.0 (`5f5ff955dcff00e5fef47c7609f9e0d4fb038178`) y `additional_tags` 4.6.0 (`3d503b183ae9254d89bc8f71a517f1f3ec1662c4`), el conjunto `tags` del deploy |
+| Instancia nueva | Redmine 7.0.1 sobre PostgreSQL 16, desplegada con `cosmoSys_deploy` (Docker Compose 2.20 o posterior) |
 
-En los ejemplos, `snapshots_gen/` es el checkout de este repositorio y `migracion/` el directorio de trabajo, con permisos solo para su dueño:
+Con otras versiones no está ensayado. El importador usa clases internas de cosmoSys que cambian de una versión a otra, y el de etiquetas se niega si `additional_tags` no es 4.6. Con otra versión de cosmoSys, ensaya antes el procedimiento entero (pasos 1 a 7) con una copia, sobre una instancia desechable.
+
+Hace falta un `cosmoSys_deploy` cuyo pin de cosmoSys sea la 0.2.10. Compruébalo en el checkout del deploy del servidor nuevo, antes del paso 5:
 
 ```sh
-git clone git@github.com:cosmoBots/snapshots_gen.git
+git ls-remote https://github.com/cosmoBots/cosmoSys.git 'refs/tags/0.2.10^{}'
+grep '^COSMOSYS_REVISION=' .env.example
+grep '^COSMOSYS_REQ_REVISION=' .env.example
+grep -E '^PLUGIN_(additionals|additional_tags)_REVISION=' plugins.conf
+```
+
+La primera y la segunda orden tienen que dar el mismo commit, `4d9e1c7e6d3ebf97c76590162fb1b19dd29f1338`, y las otras dos los de la tabla. Si `COSMOSYS_REVISION` es otro, ese checkout no instala cosmoSys 0.2.10: actualízalo (`git pull` en `main`) hasta una versión del deploy con ese pin antes de crear la instancia. El paso 5 comprueba después la imagen que de verdad corre.
+
+## Antes de empezar
+
+### Dónde se hace cada paso y cuánto tarda
+
+Los tiempos son los de un ensayo con una instancia de 26 proyectos y unos 2000 ítems (un paquete de 34 MB). Sirven para planificar la ventana en la que la instancia antigua queda congelada, del paso 2 al 8.
+
+| Paso | Dónde | Tiempo de referencia |
+| --- | --- | --- |
+| 1. Inventario | servidor antiguo | unos segundos |
+| 2. Congelar la instancia antigua | servidor antiguo | lo que tarde avisar a los usuarios |
+| 3. Exportar y tomar las referencias | servidor antiguo | 15 s la exportación y unos 40 s las referencias |
+| 3.4. Llevar los ficheros al servidor nuevo | entre los dos | lo que tarde copiar el paquete |
+| 4. Convertir | servidor nuevo | unos segundos, más la construcción de la imagen del conversor la primera vez |
+| 5. Crear la instancia nueva | servidor nuevo | 75 s hasta que está sana, más la construcción de la imagen de cosmoSys |
+| 6.1. Preparar | servidor nuevo | 7 s |
+| 6.2. Importar cada `.csys` | servidor nuevo | de 10 a 40 s cada paquete pequeño; entre 16 y 23 minutos uno de unos 2000 ítems |
+| 6.3. Importar el historial | servidor nuevo | unos 35 s el ensayo y otros tantos la importación |
+| 6.4. Importar las etiquetas | servidor nuevo | unos 8 s el ensayo y otros tantos la importación |
+| 7. Comprobar | servidor nuevo | un par de minutos, más la revisión a mano |
+| 8. Copia de seguridad, publicar y abrir | servidor nuevo | depende del tamaño y de cómo se publique |
+
+En total, del paso 1 al 7, unos 30 minutos en el ensayo, casi todos en el paquete grande del 6.2. Cada orden del importador tarda además 5 o 6 segundos en arrancar.
+
+### Lista de comprobación
+
+- [ ] Puedes ejecutar `docker` en el servidor antiguo y sabes el nombre del contenedor de Redmine de la instancia (`docker ps --format '{{.Names}}'`; en el despliegue antiguo de cosmoSys suele ser `csys_rm-<nombre>`). Este procedimiento supone ese despliegue: un contenedor con Redmine en `/usr/src/redmine` y un usuario `redmine` dentro. Si tu instancia antigua corre de otra forma, las órdenes de los pasos 1 a 3 hay que adaptarlas.
+- [ ] En el servidor nuevo tienes Docker con Compose 2.20 o posterior, un checkout de `cosmoSys_deploy` con el pin de cosmoSys 0.2.10 (ver "Versiones con las que se ha ensayado") y salida a GitHub, Docker Hub y rubygems para construir las imágenes.
+- [ ] Hay espacio: en el servidor nuevo, unas cuatro veces lo que ocupan los adjuntos y la base de la instancia antigua (el paquete antiguo, los convertidos, su copia dentro del contenedor y la instancia ya importada); en el antiguo, unas dos veces. El inventario (paso 1) dice cuánto ocupan los adjuntos.
+- [ ] Sabes cómo llevarás los ficheros del servidor antiguo al nuevo (paso 3.4), si no son el mismo.
+- [ ] La ventana de congelación está acordada y los usuarios lo saben: del paso 2 al 8 nadie trabaja ni en la instancia antigua ni en la nueva.
+- [ ] Está decidido cómo se publicará la instancia nueva (paso 8.2): con el proxy del deploy, con un proxy propio o sin proxy.
+- [ ] Está decidido cuánto tiempo se conserva la instancia antigua parada como vuelta atrás (paso 9).
+- [ ] Has leído "Material sensible" y tu organización acepta cómo se van a guardar, llevar y borrar los ficheros.
+
+### Preparar el directorio de trabajo
+
+En cada servidor, trabaja en un directorio propio, fuera del checkout del deploy y de cualquier carpeta sincronizada o con copias automáticas. En los ejemplos, `snapshots_gen/` es el checkout de este repositorio y `migracion/` el directorio de los ficheros que se generan, los dos dentro de ese directorio de trabajo, y todas las órdenes se ejecutan desde él:
+
+```sh
+umask 077
+mkdir -m 700 cosmosys-migracion
+cd cosmosys-migracion
+git clone https://github.com/cosmoBots/snapshots_gen.git
+git -C snapshots_gen rev-parse HEAD
 mkdir -m 700 migracion
 ```
+
+Usa la misma revisión de `snapshots_gen` en los dos servidores: la última orden de `git` la imprime. Si el servidor antiguo no llega a GitHub, crea en el nuevo un archivo con el código y llévalo al antiguo (el código no es sensible):
+
+```sh
+git -C snapshots_gen archive --format=tar.gz --prefix=snapshots_gen/ -o snapshots_gen.tar.gz HEAD   # en el servidor nuevo
+tar xzf snapshots_gen.tar.gz                                                                       # en el servidor antiguo, en su directorio de trabajo
+```
+
+Las órdenes usan unas variables de la terminal. En el servidor antiguo:
+
+```sh
+ANTIGUO=<contenedor-antiguo>   # el nombre del contenedor de Redmine de la instancia antigua
+NOMBRE=<nombre>                # un nombre corto para la instancia, que da nombre a los paquetes
+```
+
+`<nombre>` lleva solo letras, números, `-` o `_` (por ejemplo, `antigua`). En el servidor nuevo:
+
+```sh
+NOMBRE=<nombre>                                        # el mismo que en el servidor antiguo
+DEPLOY=<ruta del checkout de cosmoSys_deploy>
+export COSMOSYS_ENV_FILE=<ruta absoluta del fichero de entorno de la instancia nueva>
+```
+
+`COSMOSYS_ENV_FILE` es el fichero de configuración de la instancia nueva que crea el paso 5 (por ejemplo, `$HOME/cosmosys/migrada.env`, fuera del directorio de trabajo, porque se conserva mientras viva la instancia); los scripts del deploy lo leen de esa variable. El `umask` y las variables se pierden al cerrar la terminal: si abres otra, vuelve a definirlos (y `NUEVO`, que define el paso 5).
 
 ## 1. Inventario
 
