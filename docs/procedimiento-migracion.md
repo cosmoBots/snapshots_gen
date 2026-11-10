@@ -612,15 +612,102 @@ Si no hay nadie con cuenta normal a mano, crea un usuario de prueba después de 
 
 ## 8. Abrir la instancia nueva
 
-- Publica la instancia y avisa a los usuarios: entran con su usuario y su contraseña de siempre, y quien tuviera 2FA tiene que volver a activarlo.
-- Borra el directorio temporal del contenedor: `docker exec -u 0 <contenedor-nuevo> rm -rf /tmp/sg`.
-- Deja la instancia antigua parada pero sin borrar, como vuelta atrás, el tiempo que se haya acordado.
+En el servidor nuevo, solo cuando el paso 7 haya salido bien.
+
+### 8.1. Limpiar el contenedor y hacer una copia de seguridad
+
+Borra del contenedor los paquetes y lo demás que se copió en el paso 5.4, y haz una copia de seguridad de la instancia recién migrada con el script del deploy. Es el punto al que se puede volver después de abrir (paso 9). Guárdala fuera del checkout del deploy y del directorio de trabajo (el paso 10 lo borra), con la terminal todavía en `umask 077`, porque el script crea la copia con los permisos que le da el `umask`:
+
+```sh
+docker exec -u 0 "$NUEVO" rm -rf /tmp/sg
+docker exec "$NUEVO" test ! -e /tmp/sg && echo "/tmp/sg borrado"
+mkdir -p -m 700 <ruta absoluta de las copias>
+(cd "$DEPLOY" && ./scripts/backup.sh <ruta absoluta de las copias>)
+```
+
+El script imprime el directorio de la copia (`<ruta absoluta de las copias>/<fecha>`). Compruébala:
+
+```sh
+COPIA=<el directorio que imprimió>
+(cd "$COPIA" && sha256sum -c SHA256SUMS)
+grep -E '^(cosmosys_revision|plugin_sets)=' "$COPIA/manifest.env"
+```
+
+Los tres ficheros tienen que decir `OK`, y el manifiesto `cosmosys_revision=4d9e1c7e6d3ebf97c76590162fb1b19dd29f1338` y `plugin_sets=tags`. La copia lleva toda la base y los adjuntos: es material sensible. Si se saca del servidor, que sea a un almacenamiento cifrado.
+
+### 8.2. Publicar
+
+Hay tres formas, según lo que se decidiera antes de empezar. En las tres se cambia el fichero de entorno, se vuelve a arrancar la instancia y se comprueba desde fuera. Al volver a arrancar, el contenedor cambia, así que vuelve a definir `NUEVO`:
+
+```sh
+(cd "$DEPLOY" && ./scripts/compose.sh up -d --wait)
+NUEVO=$(cd "$DEPLOY" && ./scripts/compose.sh ps -q redmine); echo "$NUEVO"
+```
+
+En los ejemplos, `cosmosys.example.org` es el nombre público de la instancia. Si la instancia antigua va a seguir accesible con el mismo nombre de host, conserva el `COSMOSYS_SESSION_COOKIE_KEY` propio del paso 5.1.
+
+**Con el proxy del deploy.** Hace falta que el proxy de `cosmoSys_deploy` ya corra en este servidor (su README, "Shared reverse proxy"), que el nombre apunte al servidor y, para un certificado de Let's Encrypt, que los puertos 80 y 443 lleguen desde Internet. Añade al fichero de entorno, sin cambiar `COSMOSYS_BIND_ADDRESS`:
+
+```dotenv
+COSMOSYS_PROXY_MODE=shared
+COSMOSYS_HOSTNAME=cosmosys.example.org
+COSMOSYS_PROXY_TLS=<el correo de la cuenta de Let's Encrypt, o internal>
+```
+
+Si el proxy usa una red distinta de `caddy_proxy`, añade también `COSMOSYS_PROXY_NETWORK` con la suya. Al arrancar, el deploy pone en Redmine el nombre y el protocolo `https`, salvo que un administrador ya los haya cambiado; compruébalo con `(cd "$DEPLOY" && ./scripts/compose.sh logs bootstrap)`, que tiene que decir `Configured host_name as cosmosys.example.org` y `Configured protocol as https`.
+
+**Con un proxy propio** (Nginx, Apache, Traefik, Caddy...). Si el proxy corre en el mismo servidor, deja `COSMOSYS_BIND_ADDRESS=127.0.0.1` y apúntalo a `http://127.0.0.1:<COSMOSYS_HTTP_PORT>`; si corre en otra máquina, pon en `COSMOSYS_BIND_ADDRESS` la dirección del servidor en la red que los une y cierra ese puerto a todo lo que no sea el proxy. El proxy tiene que pasar las cabeceras `Host` (el nombre público), `X-Forwarded-For` y `X-Forwarded-Proto` (`https`), admitir subidas al menos tan grandes como el tamaño máximo de adjuntos de Redmine (Administración, Configuración, Ficheros) y esperar varios minutos a las respuestas largas, como las exportaciones. Por ejemplo, en Nginx:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:<COSMOSYS_HTTP_PORT>;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    client_max_body_size 100m;
+    proxy_read_timeout 600s;
+}
+```
+
+Después, en Redmine (Administración, Configuración, General), pon "Nombre y ruta del servidor" a `cosmosys.example.org` y "Protocolo" a HTTPS: con ellos genera Redmine los enlaces de sus exportaciones, sus fuentes Atom y sus correos, si algún día los hay.
+
+**Sin proxy**, solo dentro de una red de confianza o una VPN. Pon en `COSMOSYS_BIND_ADDRESS` la dirección del servidor en esa red (o `0.0.0.0` para todas sus interfaces) y en `COSMOSYS_HTTP_PORT` el puerto, y limita el acceso a ese puerto con el cortafuegos del servidor. Sin TLS, las contraseñas viajan sin cifrar por la red. En Redmine (Administración, Configuración, General), pon "Nombre y ruta del servidor" a `<dirección o nombre>:<puerto>` y "Protocolo" a HTTP.
+
+Comprueba desde otra máquina de la red de los usuarios:
+
+```sh
+curl -sI https://cosmosys.example.org/login | head -n 1
+```
+
+(o `http://<dirección o nombre>:<puerto>/login` sin proxy). Tiene que responder `200`. Entra después con el navegador por esa dirección, como `admin`, y navega por un par de proyectos sin que te vuelva a pedir la contraseña.
+
+### 8.3. Abrir a los usuarios
+
+- Avisa a los usuarios: la dirección nueva; que entran con su usuario y su contraseña de siempre; que quien tuviera 2FA tiene que volver a activarlo; que quien entraba por LDAP u otra autenticación externa necesita que un administrador le dé una contraseña; y que la instancia nueva no manda correo, si no se configura.
+- Si la organización quiere notificaciones por correo, se configura ahora, ya abierta (queda fuera de este procedimiento). La importación no dejó ninguna en cola.
+- Deja la instancia antigua parada pero sin borrar, como vuelta atrás, el tiempo que se haya acordado (por ejemplo, con `docker stop` de sus contenedores).
 
 ## 9. Volver atrás
 
-Hasta el paso 8, volver atrás es simplemente no usar la instancia nueva: la antigua no ha cambiado. Desactiva su modo mantenimiento y sigue trabajando en ella. Para repetir la migración desde cero, destruye la instancia nueva con su base de datos (`docker compose down -v` con las opciones de tu despliegue) y vuelve al paso 5, o al paso 3 si la antigua ha cambiado entretanto.
+**Antes de abrir** (hasta el paso 8.2), la instancia antigua no ha cambiado: desactiva su modo mantenimiento y sigue trabajando en ella. Para repetir la migración desde cero, destruye la instancia nueva con su base de datos y sus adjuntos:
 
-Después del paso 8, lo que se haya hecho en la instancia nueva no vuelve a la antigua.
+```sh
+echo "$COSMOSYS_ENV_FILE"
+(cd "$DEPLOY" && ./scripts/compose.sh down -v)
+```
+
+`down -v` borra para siempre la base y los adjuntos de la instancia de `COSMOSYS_ENV_FILE`: comprueba con el `echo` que apunta al fichero de la instancia migrada, y no lo uses nunca con una instancia ya abierta. Después vuelve al paso 5.2 (el fichero de entorno sirve tal cual), o al 3 si la antigua ha cambiado entretanto (y entonces también al 4: los paquetes de dos conversiones no se mezclan).
+
+**Después de abrir**, lo que se haga en la instancia nueva no vuelve a la antigua. Quedan dos salidas, y las dos pierden lo que se haya hecho en la nueva desde que se abrió:
+
+- Volver a la antigua: arráncala y desactiva su modo mantenimiento. Lo hecho en la nueva habría que rehacerlo a mano en la antigua.
+- Devolver la nueva al estado recién migrado, restaurando la copia del paso 8.1. Sirve cuando el problema es de uso y no de la migración:
+
+```sh
+(cd "$DEPLOY" && RESTORE_CONFIRMATION=ERASE_EXISTING_COSMOSYS_DATA ./scripts/restore.sh "$COPIA")
+```
+
+Por eso la instancia antigua parada y la copia del paso 8.1 se conservan el tiempo acordado. Pasado ese tiempo, paso 10.
 
 ## 10. Borrar los ficheros de la migración
 
