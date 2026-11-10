@@ -366,7 +366,7 @@ Deja en `migracion/convertido/`:
 - `<nombre>.cstags`, el paquete de etiquetas de toda la instancia (también las que no usa ningún ítem), con los permisos de etiquetas que tenía cada rol, ligado a los `.csys` y al `.cshistory` de esta misma conversión;
 - `report.md` y `report.json`, el informe de conversión.
 
-**Lee `report.md` antes de seguir.** Está ordenado por gravedad:
+**Lee el informe antes de seguir.** `report.md` está ordenado por gravedad:
 
 - `Blocking`: no se puede seguir. La orden termina con código 1. Un `.cstags` no importable también es `Blocking` (`tags_blocking`, con el número de casos por código); el `.cstags` se escribe igualmente, para diagnosticarlo.
 - `Warning`: algo se pierde o se adapta y conviene saberlo: adjuntos sin fichero, referencias `#id` a ítems que no existen, cambios del historial que no se pueden traducir o que solo nombraban registros borrados, tablas Markdown ambiguas. En `tags_warning`, lo que hay que revisar de las etiquetas antes de entregar: etiquetas desactivadas en los ajustes, etiquetas sin uso (el plugin nuevo las borra tras cualquier edición), nombres que solo difieren en mayúsculas (`case_variant_names`: la primera edición normal de un ítem que tenga las dos las funde en una), nombres con coma (`comma_in_name`: se importan como una sola etiqueta, pero la primera edición normal del ítem la parte en varias por la coma) o dos etiquetas del mismo grupo `grupo::` en un ítem (`scoped_tag_conflict`: el plugin nuevo no deja guardar ese ítem hasta quitar una). La importación las deja exactas; el problema aparece al usarlas después. Si alguno de estos recuentos no es 0, decide antes de entregar si se renombran en la instancia antigua (y se vuelve a exportar) o se aceptan.
@@ -484,7 +484,7 @@ importar prepare /tmp/sg/pkg/"$NOMBRE".cshistory
 
 Termina con una línea `Prepared: created_users=N, ...`. Revisa lo que dice de los roles (`Role rqWriter -> Developer`...). Si un rol antiguo no tiene destino, sus membresías no se importarán; créalo en la instancia nueva o indica otro con `roles=rqWriter:Developer,...` en el paso 6.3. Si dice `Missing trackers (the .csys import will refuse their items): ...`, crea esos trackers (paso 5.3) y repite esta orden.
 
-**6.2. Importar cada `.csys`:** hay uno por proyecto raíz de la instancia antigua (`ls migracion/convertido/*.csys`), y da igual en qué orden se importen. Cada uno, primero sin confirmar, que solo enseña el preflight de cosmoSys (el mismo que la interfaz):
+**6.2. Importar cada paquete de proyecto:** hay un `.csys` por proyecto raíz de la instancia antigua (`ls migracion/convertido/*.csys`), y da igual en qué orden se importen. Cada uno, primero sin confirmar, que solo enseña el preflight de cosmoSys (el mismo que la interfaz):
 
 ```sh
 importar csys /tmp/sg/pkg/<nombre>-<identificador>.csys
