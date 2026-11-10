@@ -197,6 +197,24 @@ grep -q 'already have the tag permissions of their source roles' "$out/tags-agai
 raw_state >"$out/state-second.txt"
 same "$out/state-first.txt" "$out/state-second.txt" "the second import changed no row, date or counter"
 
+step "a tag change of the history that is not the one of the package: refused"
+# The history in the instance must be the one of this .cshistory (R2 of the
+# adversarial review): one tag change altered, then one removed.
+psql -c "UPDATE journal_details SET value = value || ' (edited)' WHERE id = (SELECT MIN(id) FROM journal_details WHERE property = 'attr' AND prop_key = 'tag_list' AND value <> '')"
+raw_state >"$out/state-history-edited.txt"
+expect_refusal tags-history-edited 'is not the one of this history package' tags "$tags"
+psql -c "UPDATE journal_details SET value = left(value, length(value) - length(' (edited)')) WHERE property = 'attr' AND prop_key = 'tag_list' AND value LIKE '% (edited)'"
+psql -c "CREATE TABLE sg_e2e_detail AS SELECT * FROM journal_details WHERE id = (SELECT MAX(id) FROM journal_details WHERE property = 'attr' AND prop_key = 'tag_list')" \
+  -c "DELETE FROM journal_details WHERE id IN (SELECT id FROM sg_e2e_detail)"
+expect_refusal tags-history-missing 'tag changes in its history here' tags "$tags"
+psql -c "INSERT INTO journal_details SELECT * FROM sg_e2e_detail" -c "DROP TABLE sg_e2e_detail"
+raw_state >"$out/state-history-after.txt"
+same "$out/state-history-edited.txt" "$out/state-history-after.txt" "the refusals wrote nothing"
+logical_state >"$out/actual-history.tsv"
+same "$out/expected.tsv" "$out/actual-history.tsv" "the history is as the package says again"
+runner tags-history-restored tags "$tags" || fail "the import with the history restored failed"
+grep -q '^Nothing to import' "$out/tags-history-restored.log" || fail "with the history restored the import did not find everything there"
+
 step "a tag permission removed by hand from a role: given again, and only that"
 psql -c "UPDATE roles SET permissions = replace(permissions, E'- :view_issue_tags\n', '') WHERE name = 'Developer'"
 runner tags-roles-repair tags "$tags" || fail "the import that repairs the role failed"

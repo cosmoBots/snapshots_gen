@@ -454,8 +454,9 @@ module SnapshotsGen
       end
 
       # The sibling history package must describe the same items, and the
-      # history import must already have run: it is what gives every item its
-      # source creation date.
+      # history import must already have run, with this very package: every
+      # item has its source creation date, and the tag changes of the history
+      # in this instance are exactly those of the package (history_tag_changes).
       def check_history!
         problems = []
         pending = 0
@@ -463,6 +464,7 @@ module SnapshotsGen
         Package.open(@history_path) do |history|
           identifiers = history.by_id('projects').transform_values { |row| row['identifier'] }
           items = history.rows('items').to_h { |row| [row['key'], row] }
+          @history_tag_changes = expected_tag_changes(history)
           created = Issue.unscoped.where(id: @managed.keys.select { |key| key.first == 'Issue' }.map(&:last)).pluck(:id, :created_on).to_h
           @objects.each do |object_id, row|
             target = row.fetch('target')
@@ -481,10 +483,58 @@ module SnapshotsGen
           end
         end
         fail_with('the tags package and the history package do not describe the same items', problems)
-        return if pending.zero?
+        if pending.positive?
+          raise Error, "the history is not imported yet: #{pending} of #{checked} items do not have their source creation date " \
+                       '(import the history first, step 6.3)'
+        end
+        if checked.zero? && @history_tag_changes.empty? && @objects.values.any? { |row| row.dig('target', 'type') == 'Issue' }
+          raise Error, 'the history is not imported yet, or cannot be told: no item of the package has a creation date or a tag change to compare'
+        end
 
-        raise Error, "the history is not imported yet: #{pending} of #{checked} items do not have their source creation date " \
-                     '(import the history first, step 6.3)'
+        fail_with('the history in this instance is not the one of this history package (tag changes differ); nothing was written',
+                  tag_change_differences)
+      end
+
+      # The tag changes (attr/tag_list details) of the package, by destination
+      # issue: [journal created_on, private, old value, new value]. The history
+      # import keeps them literally and never drops them, so after it the
+      # instance has exactly these.
+      def expected_tag_changes(history)
+        issue_of = @objects.values.select { |row| row.dig('target', 'type') == 'Issue' }
+                           .to_h { |row| [row.dig('target', 'item_key'), @destination[row['id']]&.last] }
+        journals = history.rows('journals').to_h { |row| [row['id'], row] }
+        expected = Hash.new { |hash, key| hash[key] = [] }
+        history.rows('journal_details').each do |detail|
+          next unless detail['property'] == 'attr' && detail['prop_key'] == 'tag_list'
+
+          journal = journals[detail['journal_id']]
+          issue = journal && issue_of[journal['item_key']]
+          raise Error, "tag change #{detail['id']} of the history package is on an item that is not in the tags package" unless issue
+
+          expected[issue] << [journal['created_on'] && Time.iso8601(journal['created_on']), journal['private_notes'] == true,
+                              detail['old_value'], detail['value']]
+        end
+        expected
+      end
+
+      def tag_change_differences
+        issues = @managed.keys.select { |type, _id| type == 'Issue' }.map(&:last)
+        found = Hash.new { |hash, key| hash[key] = [] }
+        issues.each_slice(BATCH * 4) do |ids|
+          JournalDetail.joins(:journal).where(journals: { journalized_type: 'Issue', journalized_id: ids }, property: 'attr', prop_key: 'tag_list')
+                       .pluck('journals.journalized_id', 'journals.created_on', 'journals.private_notes', 'journal_details.old_value',
+                              'journal_details.value')
+                       .each { |issue, *change| found[issue] << [change[0], change[1] == true, change[2], change[3]] }
+        end
+        key = ->(change) { [change[0] ? change[0].to_f : -1.0, change[1] ? 1 : 0, change[2].to_s.b, change[2].nil? ? 0 : 1, change[3].to_s.b, change[3].nil? ? 0 : 1] }
+        (issues | @history_tag_changes.keys).filter_map do |issue|
+          here = found.fetch(issue, []).sort_by(&key)
+          wanted = @history_tag_changes.fetch(issue, []).sort_by(&key)
+          next if here.length == wanted.length && here.zip(wanted).all? { |a, b| a[0] == b[0] && a[1..] == b[1..] }
+
+          "Issue ##{issue}: #{here.length} tag changes in its history here, #{wanted.length} in the history package" \
+            "#{here.length == wanted.length ? ' (different dates or values)' : ''}"
+        end
       end
 
       # --- plan: what is already there, what is missing, what conflicts --------
