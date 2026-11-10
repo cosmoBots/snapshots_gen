@@ -13,6 +13,13 @@
 #       After every .csys import and before anyone works in the instance:
 #       writes the history and restores authors, dates and memberships, then
 #       verifies it, all in one transaction.
+#   rails runner import.rb tags TAGS.cstags [dry_run=yes] [packages=DIRECTORY]
+#       After the history: writes the tags of the instance straight into the
+#       tables of the tag plugin and applies its source settings, in one
+#       transaction that is verified before it commits. The .cshistory and
+#       every .csys of the same conversion must be next to the .cstags (or in
+#       packages=DIRECTORY). It needs the converter/ directory of this
+#       repository next to importer/ (the package format lives there).
 
 require_relative 'history_importer'
 
@@ -43,8 +50,13 @@ module SnapshotsGen
         File.write(report, JSON.pretty_generate(summary) + "\n")
         puts "Statistics: #{summary['stats'].map { |key, value| "#{key}=#{value}" }.join(', ')}"
         puts "Dropped: #{summary['dropped'].length} (see #{report})"
+      when 'tags'
+        # Loaded only here: the other steps do not need the tags package format.
+        require_relative 'tags_importer'
+        TagsRun.new(path, options).call
       else
-        warn 'usage: import.rb prepare|history HISTORY.cshistory [options] | csys PACKAGE.csys [parent=IDENTIFIER] [confirm=yes]'
+        warn 'usage: import.rb prepare|history HISTORY.cshistory [options] | csys PACKAGE.csys [parent=IDENTIFIER] [confirm=yes] ' \
+             '| tags TAGS.cstags [dry_run=yes] [packages=DIRECTORY]'
         exit 2
       end
     rescue Error => error

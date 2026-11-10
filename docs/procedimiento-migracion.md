@@ -1,12 +1,13 @@
 # Migrar una instancia antigua de cosmoSys
 
-Este procedimiento lleva una instancia antigua de cosmoSys (Redmine 4.2 con los plugins `cosmosys_*`) a una instancia nueva de cosmoSys (Redmine 7), con su historial: notas, cambios, versiones de wiki, tiempo dedicado, observadores, usuarios con su contraseña, autores y fechas. Está escrito para seguirlo de principio a fin sin ayuda.
+Este procedimiento lleva una instancia antigua de cosmoSys (Redmine 4.2 con los plugins `cosmosys_*`) a una instancia nueva de cosmoSys (Redmine 7), con su historial: notas, cambios, versiones de wiki, tiempo dedicado, observadores, usuarios con su contraseña, autores y fechas, y con sus etiquetas. Está escrito para seguirlo de principio a fin sin ayuda.
 
 ## Qué hace y qué no
 
 - **La instancia antigua no se toca.** Solo se lee, dentro de una transacción de solo lectura. No se instala nada, no se migra la base de datos y no se reinicia el contenedor. Lo único que se escribe es un directorio temporal dentro del contenedor, que se borra al terminar.
 - **La instancia nueva tiene que estar vacía y cerrada** hasta el final del paso 7. Nadie debe trabajar en ella antes de importar el historial: Redmine usa el orden de las notas en varias funciones, y un historial añadido después quedaría desordenado. El importador se niega si encuentra notas que no sean suyas.
-- **Lo que no se migra** lo dice el informe de conversión. Entre otras cosas: lo que el cosmoSys antiguo nunca guardó en el historial (los botones de borrar y zombi, mover y reordenar en el árbol, las importaciones ODS y git), las noticias, los foros y los repositorios. Las etiquetas llegan en una fase posterior.
+- **Lo que no se migra** lo dice el informe de conversión. Entre otras cosas: lo que el cosmoSys antiguo nunca guardó en el historial (los botones de borrar y zombi, mover y reordenar en el árbol, las importaciones ODS y git), las noticias, los foros y los repositorios.
+- **Las etiquetas se migran tal cual** (paso 6.4): las mismas etiquetas, con el mismo nombre exacto, en los mismos ítems y páginas de wiki, con sus fechas, y los cambios de etiquetas en el historial. Lo que no se conserva es el orden de las etiquetas de cada ítem (el plugin nuevo siempre las ordena por nombre), y el plugin nuevo borra por su cuenta las etiquetas que no usa ningún ítem en cuanto alguien edita un ítem, igual que hacía el antiguo.
 - **Los modelos PORIS se migran en parte.** Ya llegan sus ítems, su jerarquía, sus campos personalizados (como campos personalizados) y sus relaciones, con los cambios que cuenta "Qué cambia en la conversión". En una fase posterior sus campos pasarán a los datos propios del perfil `poris` del cosmoSys nuevo y sus proyectos tomarán ese perfil; hasta entonces se importan como proyectos de ítems o de requisitos.
 - **Las contraseñas se conservan**: Redmine 4.2 y 7 las guardan igual. **El 2FA se reinicia**: quien lo usaba tiene que volver a activarlo.
 
@@ -155,6 +156,7 @@ Crea una instancia nueva y vacía con `cosmoSys_deploy` (`main`), siguiendo su R
 
 - variante `requirements` si la instancia antigua tenía requisitos (tracker `rq`);
 - el conjunto opcional `poris` si el inventario muestra ítems de los trackers `pr*`: trae `prSys`, `prParam`, `prMode`, `prValue` y `prCmd`, y la conversión lleva `prValFloat` y `prValText` a `prValue`;
+- el conjunto opcional `tags` (`COSMOSYS_PLUGINS=tags`, o `poris,tags`): instala los plugins de etiquetas. Sin él, el paso 6.4 se niega a importar las etiquetas;
 - un administrador propio (`COSMOSYS_INITIAL_ADMIN_PASSWORD`). Si en la instancia antigua había un usuario `admin`, se empareja con este y se queda con la contraseña nueva.
 
 No la publiques todavía y no dejes entrar a nadie. En el resto del documento, `<contenedor-nuevo>` es su contenedor de Redmine (`<proyecto>-redmine-1`).
@@ -167,9 +169,12 @@ Copia en el contenedor el importador y los paquetes:
 docker exec -u 0 <contenedor-nuevo> mkdir -p /tmp/sg/pkg
 docker cp snapshots_gen/exporter <contenedor-nuevo>:/tmp/sg/exporter
 docker cp snapshots_gen/importer <contenedor-nuevo>:/tmp/sg/importer
-for f in migracion/convertido/*.csys migracion/convertido/*.cshistory; do docker cp "$f" <contenedor-nuevo>:/tmp/sg/pkg/; done
+docker cp snapshots_gen/converter <contenedor-nuevo>:/tmp/sg/converter
+for f in migracion/convertido/*.csys migracion/convertido/*.cshistory migracion/convertido/*.cstags; do docker cp "$f" <contenedor-nuevo>:/tmp/sg/pkg/; done
 docker exec -u 0 <contenedor-nuevo> chown -R redmine:redmine /tmp/sg
 ```
+
+`/tmp/sg/pkg` tiene que quedar con todos los `.csys`, el `.cshistory` y el `.cstags` de la misma conversión y con ningún otro: el paso 6.4 comprueba que son exactamente los que se convirtieron juntos. El directorio `converter` hace falta porque en él está el lector del `.cstags`.
 
 Para no repetir la orden larga, define:
 
@@ -179,7 +184,7 @@ importar() { docker exec -u redmine -w /usr/src/redmine <contenedor-nuevo> bundl
 
 ## 6. Importar
 
-Son tres pasos, siempre en este orden.
+Son cuatro pasos, siempre en este orden.
 
 **6.1. Preparar:** crea los usuarios que falten, con su contraseña, los grupos, las definiciones de los campos personalizados que se conservan y las actividades de tiempo. Empareja por login los usuarios que ya existan. Repetirlo no duplica nada.
 
@@ -217,6 +222,27 @@ importar history /tmp/sg/pkg/<nombre>.cshistory
 
 Todo ocurre en una sola transacción: o queda todo importado y verificado, o no queda nada. Al final dice cuántos journals, versiones de wiki, entradas de tiempo, observadores y membresías ha escrito, y deja un informe en `/tmp/sg/pkg/history-import-<fecha>.json` con lo que no pudo traducir. Cópialo:
 
+**6.4. Importar las etiquetas**, también primero en ensayo (escribe todo, lo verifica y lo deshace):
+
+```sh
+importar tags /tmp/sg/pkg/<nombre>.cstags dry_run=yes
+```
+
+Si termina en `Dry run: everything was rolled back.`, impórtalas de verdad:
+
+```sh
+importar tags /tmp/sg/pkg/<nombre>.cstags
+```
+
+Tiene que terminar en `Tags imported.`. Antes de escribir nada comprueba que los plugins de etiquetas están instalados y migrados, que sus tablas son las que conoce, que cada ítem y cada página de wiki del paquete existe una sola vez en la instancia nueva y que no hay ya etiquetas que choquen con las del paquete. Después escribe las etiquetas directamente en las tablas del plugin, sin pasar por los ítems (no crea notas en el historial, no cambia la fecha de ningún ítem y no manda correo), pone los ajustes del plugin como estaban en la instancia antigua (si las etiquetas estaban activadas, las activa) y, antes de confirmar, vuelve a leer la base y comprueba que cada ítem y cada página tiene exactamente las etiquetas del paquete, también los que no tenían ninguna, y que nada más ha cambiado. Todo ocurre en una sola transacción: o queda todo, o no queda nada.
+
+Repetir la orden no cambia nada: la segunda vez dice `Nothing to import` y deja la base como estaba. Lee los avisos del final (`WARNING`):
+
+- `roles ... lack the view_issue_tags permission`: los miembros con esos roles no verán las etiquetas ni los cambios de etiquetas del historial. La instancia nueva solo da los permisos de etiquetas (`view_issue_tags`, `create_issue_tags`, `edit_issue_tags` y `add_wiki_tags`) al rol `Manager`; dáselos a los roles que los tenían en la instancia antigua (Administración, Roles y permisos).
+- `active_issue_tags is off, as in the source`: en la instancia antigua las etiquetas estaban desactivadas en los ajustes del plugin. Están importadas, pero no se ven hasta activarlas (Administración, Tags).
+
+Copia los informes de la importación (`history-import-<fecha>.json` y `tags-import-<fecha>.json`):
+
 ```sh
 docker cp <contenedor-nuevo>:/tmp/sg/pkg/. migracion/importado
 ```
@@ -247,7 +273,7 @@ docker run --rm -v "$PWD:/work" snapshots_gen-converter \
 
 Tiene que terminar en `Failures (0)`. Antes enseña las diferencias que la conversión hace a propósito (estados y campos renombrados, números de ítem nuevos, relaciones PORIS invertidas), para revisarlas. Un fallo nombra el ítem por su CSID y lo que no coincide. La línea "Labels cosmoSys lacks for its own native fields" no es un fallo de la migración: es la etiqueta de `csExtCode` y `csWLoad` que le falta a cosmoSys (ver "Qué cambia en la conversión").
 
-Por último, entra como administrador y abre dos o tres ítems con historial, la wiki y un proyecto privado con un usuario normal (con su contraseña de siempre).
+Por último, entra como administrador y abre dos o tres ítems con historial, la wiki y un proyecto privado con un usuario normal (con su contraseña de siempre). Con ese usuario normal abre también un ítem con etiquetas: tiene que ver las etiquetas y, en el historial, los cambios de etiquetas. Si no los ve, a su rol le falta el permiso `view_issue_tags` (paso 6.4).
 
 ## 8. Abrir la instancia nueva
 
@@ -263,7 +289,7 @@ Después del paso 8, lo que se haya hecho en la instancia nueva no vuelve a la a
 
 ## 10. Borrar los paquetes
 
-Cuando la instancia nueva esté abierta y comprobada, borra `migracion/` y cualquier copia de los paquetes `.cslegacy` y `.cshistory`: tienen las contraseñas cifradas y los correos de todos los usuarios.
+Cuando la instancia nueva esté abierta y comprobada, borra `migracion/` y cualquier copia de los paquetes `.cslegacy`, `.cshistory`, `.csys` y `.cstags`: los dos primeros tienen las contraseñas cifradas y los correos de todos los usuarios, y todos llevan contenido de la instancia.
 
 ## Si algo falla
 
@@ -277,3 +303,11 @@ Cuando la instancia nueva esté abierta y comprobada, borra `migracion/` y cualq
 | `journals already exist on the imported items` | Alguien ha trabajado en la instancia nueva antes de importar el historial. Empieza de nuevo desde el paso 5. |
 | `verification failed, nothing was written` | El historial no se ha importado. La lista dice qué no cuadra; manda el mensaje y el informe de conversión. |
 | `active webhooks exist` | Desactiva los webhooks de la instancia nueva durante la importación. |
+| `the tags package does not verify` | El `.cstags` está dañado, o en `/tmp/sg/pkg` no están exactamente el `.cshistory` y todos los `.csys` de la misma conversión (`not the ones this tags package was converted with`). Vuelve a copiar los paquetes de `migracion/convertido/` (paso 5) y quita cualquier otro. |
+| `the tags package is not importable` | La conversión encontró etiquetas que el plugin nuevo no puede guardar igual (`tags_blocking` en `report.md`, paso 4). No se puede seguir sin decidir qué hacer con ellas; manda el informe de conversión. |
+| `the tag plugin is not ready in this instance` | La instancia nueva no tiene el conjunto `tags`, o sus migraciones no se han aplicado. Créala con `COSMOSYS_PLUGINS=tags` (paso 5). |
+| `the tag tables are not the ones this importer knows` | El plugin de etiquetas de la instancia nueva no es el que este procedimiento conoce (`additional_tags` 4.6). No se ha escrito nada; manda el mensaje. |
+| `the history is not imported yet` | Las etiquetas van después del historial (paso 6.3). |
+| `objects of the package that are not exactly one object here` | Falta importar algún `.csys`, o un ítem o una página del paquete no está en la instancia nueva (o está más de una vez). No se ha escrito nada; manda el mensaje. |
+| `conflicts with tags that already exist in this instance` | La instancia nueva ya tenía etiquetas que no son las del paquete en los mismos ítems, o con el mismo nombre y otras fechas, o que solo se distinguen por las mayúsculas. Alguien ha trabajado en ella: empieza de nuevo desde el paso 5. |
+| `verification failed, nothing was written` (en `tags`) | Lo escrito no coincide con el paquete o ha cambiado algo más. Las etiquetas no se han importado. La lista nombra ítems y etiquetas por número y huella, sin nombres; manda el mensaje. |
