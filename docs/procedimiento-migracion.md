@@ -57,6 +57,7 @@ El historial sigue a los campos: un cambio antiguo de `rqLevel` se ve como cambi
 
 - Los ítems `AD n`, `RD n` y `CD n` pasan a ser documentos del proyecto, con su posición en el catálogo. Si el título trae código, versión y fecha, se extraen.
 - Un requisito o un `csRefDoc` con hijos queda dentro de un capítulo generado, "Group: <título>", porque en el modelo nuevo no pueden tener hijos.
+- Cada ítem que solo existe en la instancia nueva (los capítulos "Group: ...", los capítulos "Project data" y sus datos) tiene en el informe de conversión una entrada `item_generated` con su CSID final y el ítem del origen del que sale. Los CSID renumerados (`identity_renumbered`) son solo los de ítems del origen.
 - Los CSID se conservan, también los que tienen el prefijo de otro proyecto porque el ítem se movió. Solo se renumera un ítem sin CSID o con uno repetido en su árbol.
 - En los modelos PORIS, una relación "bloquea" va al revés que antes: el modo bloquea lo que incluye (sus submodos y sus valores). La conversión invierte esas relaciones y sus cambios en el historial.
 
