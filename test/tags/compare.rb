@@ -59,7 +59,7 @@ module TagsEvidence
     def initialize(source, target, report, show_names: false)
       @source, @target, @report, @show_names = source, target, report, show_names
       @failures, @information = [], []
-      @remap, @absorbed, @generated, @chapters = {}, {}, {}, []
+      @remap, @absorbed, @generated = {}, {}, {}
       @expected_generated = []
       @tag_refs = { 'source' => Hash.new { |hash, key| hash[key] = [] }, 'target' => Hash.new { |hash, key| hash[key] = [] } }
       @object_refs = { 'source' => Hash.new { |hash, key| hash[key] = [] }, 'target' => Hash.new { |hash, key| hash[key] = [] } }
@@ -104,47 +104,86 @@ module TagsEvidence
       value
     end
 
+    GENERATED_KINDS = { 'group' => 'group', 'data' => 'data_section', 'datum' => 'datum' }.freeze
+
     def report_map
       unless @report.is_a?(Hash) && @report['format'] == 'snapshots_gen-conversion-report-v1' && @report['entries'].is_a?(Array)
         raise InvalidEvidence, 'unsupported conversion report'
       end
+      announced = { 'group' => {}, 'data_section' => {}, 'datum' => {} }
       @report['entries'].each do |entry|
         raise InvalidEvidence, 'invalid conversion report entry' unless entry.is_a?(Hash)
+        detail = entry['detail']
         case entry['code']
         when 'identity_renumbered', 'identity_prefix_normalized'
-          match = /\Aitem:(group-)?(\d+)\z/.match(entry['subject'].to_s)
-          detail = entry['detail']
+          # Source items only: generated items have item_generated.
+          match = /\Aitem:(\d+)\z/.match(entry['subject'].to_s)
           unless match && detail.is_a?(Hash) && detail.key?('from') && text?(detail['to'])
             raise InvalidEvidence, 'unusable identity mapping in report'
           end
-          id = match[2].to_i
-          mapping = match[1] ? @generated : @remap
-          raise InvalidEvidence, 'duplicate identity mapping in report' if mapping.key?(id)
-          raise InvalidEvidence, 'generated identity has a source CSID' if match[1] && !detail['from'].nil?
-          mapping[id] = detail
+          id = match[1].to_i
+          raise InvalidEvidence, 'duplicate identity mapping in report' if @remap.key?(id)
+          @remap[id] = detail
         when 'document_item_absorbed'
           match = /\A#(\d+)\s/.match(entry['subject'].to_s)
           raise InvalidEvidence, 'unusable absorbed identity in report' unless match
           raise InvalidEvidence, 'duplicate absorbed identity in report' if @absorbed.key?(match[1].to_i)
-          raise InvalidEvidence, 'missing absorbed project in report' unless entry['detail'].is_a?(Hash) && text?(entry['detail']['project'])
-          @absorbed[match[1].to_i] = entry['detail']['project']
+          raise InvalidEvidence, 'missing absorbed project in report' unless detail.is_a?(Hash) && text?(detail['project'])
+          @absorbed[match[1].to_i] = detail['project']
+        when 'item_generated'
+          match = /\Aitem:(group|data|datum)-(\d+)\z/.match(entry['subject'].to_s)
+          kind = match && GENERATED_KINDS[match[1]]
+          from = kind == 'data_section' ? nil : "item:#{match && match[2]}"
+          unless kind && detail.is_a?(Hash) && detail['kind'] == kind && text?(detail['project']) && text?(detail['csid']) &&
+                 detail.key?('from') && detail['from'] == from
+            raise InvalidEvidence, 'unusable generated item in report'
+          end
+          raise InvalidEvidence, 'duplicate generated item in report' if @generated.key?(entry['subject'])
+          @generated[entry['subject']] = detail
         when 'synthetic_chapter'
           match = /\Aitem:(\d+)\z/.match(entry.dig('detail', 'around').to_s)
           raise InvalidEvidence, 'unusable generated chapter in report' unless match
-          raise InvalidEvidence, 'duplicate generated chapter in report' if @chapters.include?(match[1].to_i)
-          @chapters << match[1].to_i
+          subject = "item:group-#{match[1]}"
+          raise InvalidEvidence, 'duplicate generated chapter in report' if announced['group'].key?(subject)
+          announced['group'][subject] = {}
+        when 'data_section_created'
+          raise InvalidEvidence, 'unusable data chapter in report' unless /\Aitem:data-\d+\z/.match?(entry['subject'].to_s) && detail.is_a?(Hash)
+          raise InvalidEvidence, 'duplicate data chapter in report' if announced['data_section'].key?(entry['subject'])
+          announced['data_section'][entry['subject']] = { 'csid' => detail['csid'], 'project' => detail['project'] }
+        when 'datum_created'
+          match = /\Aitem:datum-(\d+)\z/.match(entry['subject'].to_s)
+          unless match && detail.is_a?(Hash) && detail['requirement'] == "item:#{match[1]}"
+            raise InvalidEvidence, 'unusable datum in report'
+          end
+          raise InvalidEvidence, 'duplicate datum in report' if announced['datum'].key?(entry['subject'])
+          announced['datum'][entry['subject']] = { 'csid' => detail['variable'] }
         end
       end
-      source_ids = @source.objects.select { |row| row['type'] == 'Issue' }.map { |row| row['id'] }
-      (@remap.keys + @absorbed.keys + @generated.keys + @chapters).uniq.each do |id|
-        fail_at('report_unknown_issue', 'report', { 'id' => id }) unless source_ids.include?(id)
+      # Each generated item must be announced by the converter step that
+      # creates it, and each announced one must have its final identity.
+      announced.each do |kind, subjects|
+        mine = @generated.select { |_subject, detail| detail['kind'] == kind }
+        raise InvalidEvidence, 'generated item lacks its final identity in report' unless (subjects.keys - mine.keys).empty?
+        raise InvalidEvidence, 'generated item without its announcement in report' unless (mine.keys - subjects.keys).empty?
+        subjects.each do |subject, expected|
+          expected.each do |key, value|
+            raise InvalidEvidence, 'generated item disagrees with its announcement' unless mine.fetch(subject)[key] == value
+          end
+        end
       end
-      raise InvalidEvidence, 'generated chapter lacks its final identity in report' unless @generated.keys.sort == @chapters.sort
-      @generated.each do |id, mapping|
-        objects = @source.objects.select { |row| row['type'] == 'Issue' && row['id'] == id }
-        raise InvalidEvidence, 'ambiguous generated chapter origin' unless objects.length == 1
-        @expected_generated << ['Issue', objects.first['project'], mapping['to']]
-        @information << "generated_unlabelled_chapter around_id=#{id} (report)"
+      source_issues = @source.objects.select { |row| row['type'] == 'Issue' }
+      origins = @generated.values.map { |detail| detail['from'] && detail['from'].delete_prefix('item:').to_i }.compact
+      (@remap.keys + @absorbed.keys + origins).uniq.each do |id|
+        fail_at('report_unknown_issue', 'report', { 'id' => id }) unless source_issues.any? { |row| row['id'] == id }
+      end
+      source_projects = @source.objects.map { |row| row['project'] }.uniq
+      @generated.sort.each do |subject, detail|
+        origin = detail['from'] && source_issues.find { |row| "item:#{row['id']}" == detail['from'] }
+        if (origin && origin['project'] != detail['project']) || !source_projects.include?(detail['project'])
+          fail_at('report_generated_project_mismatch', 'report')
+        end
+        @expected_generated << ['Issue', detail['project'], detail['csid']]
+        @information << "generated_unlabelled_item kind=#{detail['kind']} subject=#{subject} (report)"
       end
     end
 
@@ -245,7 +284,7 @@ module TagsEvidence
       tags = index(document.tags, side, 'tag')
       index(document.assignments, side, 'assignment')
       objects = {}
-      logical_objects, catalog, assignments, dates = [], [], [], []
+      logical_objects, catalog, assignments, dates, foreign_objects = [], [], [], [], []
       physical_counts = Hash.new(0)
       logical_assignment_counts = Hash.new(0)
       document.objects.each do |row|
@@ -266,9 +305,15 @@ module TagsEvidence
         absorbed = side == 'source' && type == 'Issue' && @absorbed.key?(id)
         fail_at('report_absorbed_project_mismatch', side, row) if absorbed && @absorbed[id] != row['project']
         fail_at('invalid_object_identity', side, row) unless absorbed || (text?(row['project']) && text?(identifier))
-        objects[physical_key] = { key: logical_key, row: row, absorbed: absorbed }
+        # A new instance brings projects of its own (help wikis) that are
+        # not part of the migration: outside the coverage, but never tagged.
+        foreign = side == 'target' && !@source_projects.include?(row['project'])
+        generated = side == 'target' && @expected_generated.include?(logical_key)
+        objects[physical_key] = { key: logical_key, row: row, absorbed: absorbed, foreign: foreign, generated: generated }
         if absorbed
           @information << "absorbed_unlabelled_issue id=#{id} (report)"
+        elsif foreign
+          foreign_objects << row
         else
           logical_objects << logical_key
         end
@@ -308,6 +353,8 @@ module TagsEvidence
         end
         next unless object && tag
         fail_at('absorbed_issue_has_tags', side, row) if object[:absorbed]
+        fail_at('foreign_object_has_tags', side, row) if object[:foreign]
+        fail_at('generated_item_has_tags', side, row) if object[:generated]
         next unless tag['name'].is_a?(String) || tag['name'].is_a?(Hash)
 
         name = byte_key(tag['name'])
@@ -317,6 +364,11 @@ module TagsEvidence
         logical_assignment_counts[key] += 1
         active = row['taggable_type'] == 'Issue' ? 'active_issue_tags' : 'active_wiki_tags'
         fail_at('tag_visibility_disabled', side, row) unless settings[active] == '1'
+      end
+      unless foreign_objects.empty?
+        types = %w[Issue WikiPage].map { |type| "#{type}=#{foreign_objects.count { |row| row['type'] == type }}" }
+        @information << "foreign_unlabelled_objects count=#{foreign_objects.length} #{types.join(' ')} " \
+                        "projects=#{foreign_objects.map { |row| row['project'] }.uniq.length} (target projects that are not in the source)"
       end
       logical_assignment_counts.each do |key, count|
         fail_at('duplicate_assignment_projection', side, nil, key) if count > 1
@@ -340,6 +392,7 @@ module TagsEvidence
       validate_schema(@source, 'source')
       validate_schema(@target, 'target')
       report_map
+      @source_projects = @source.objects.map { |row| row['project'] }.uniq
       source = inventory(@source, 'source')
       target = inventory(@target, 'target')
       difference('object_coverage', source[:objects], target[:objects])

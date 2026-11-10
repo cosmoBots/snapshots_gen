@@ -35,4 +35,25 @@ class ImporterDropsTest < Minitest::Test
                     'item' => 'item:3', 'csid' => 'ALP-0003' }], summary['dropped']
     assert_equal({ 'journal_detail' => 1 }, summary['dropped_counts'])
   end
+
+  # The converter writes id 0 for an attachment the item no longer has and
+  # reports it; the importer writes exactly that. An attachment the package
+  # says is migrated but that the importer cannot find is never turned into 0
+  # on its own: it is dropped and named, so the gate sees it.
+  def test_attachment_changes_follow_the_package_and_never_become_zero_silently
+    run = run_with_items
+    run.instance_variable_set(:@attachment_map, { 7 => 70 })
+    journal = { 'id' => 10, 'item_key' => 'item:3' }
+    kept = { 'id' => 100, 'property' => 'attachment', 'prop_key' => '7', 'prop_ref' => 'attachments',
+             'old_value' => nil, 'value' => 'kept.txt' }
+    cleared = kept.merge('id' => 101, 'prop_key' => '0', 'prop_ref' => nil, 'value' => 'gone.txt')
+    unknown = kept.merge('id' => 102, 'prop_key' => '9')
+    assert_equal({ 'property' => 'attachment', 'prop_key' => '70', 'old_value' => nil, 'value' => 'kept.txt' },
+                 run.send(:translate, kept, 300, journal))
+    assert_equal({ 'property' => 'attachment', 'prop_key' => '0', 'old_value' => nil, 'value' => 'gone.txt' },
+                 run.send(:translate, cleared, 300, journal))
+    assert_nil run.send(:translate, unknown, 300, journal)
+    assert_equal [{ 'kind' => 'journal_detail', 'id' => 102, 'reason' => 'attachment 9 not migrated', 'journal' => 10,
+                    'item' => 'item:3', 'csid' => 'ALP-0003' }], run.summary['dropped']
+  end
 end

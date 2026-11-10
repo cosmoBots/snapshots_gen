@@ -252,6 +252,27 @@ module HistoryComparison
       end
     end
 
+    # HistoryBuilder#translate_attachment: an attachment the item no longer
+    # has (deleted from the source, or migrated with another container) is
+    # written with id 0 and reported with every identifier. The reason must
+    # agree with the source: a deleted attachment is missing there, one not
+    # migrated with this item still exists.
+    def attachment_evidence(old, detail, journal_id)
+      return nil unless detail['property'] == 'attachment'
+
+      field = detail['field']
+      deleted = field == { 'missing_attachment' => detail['prop_key'] }
+      present = field.is_a?(Hash) && field.key?('filename')
+      sides = { 'old_value' => 'old', 'value' => 'new' }.reject { |column, _side| detail[column].to_s.empty? }.values
+      entry('history_attachment_cleared') do |e|
+        d = e.fetch('detail', {})
+        e['subject'] == "detail ##{detail['id']}" && d['item'] == "item:#{old['id']}" && d['journal'] == journal_id &&
+          d['attachment'] == detail['prop_key'] && d['old_value'] == detail['old_value'] && d['value'] == detail['value'] &&
+          d['missing'] == sides &&
+          ((d['reason'] == 'deleted from the source' && deleted) || (d['reason'] == 'not migrated with this item' && present))
+      end
+    end
+
     def dropped_detail(old, detail, journal_id)
       regular = entry('history_detail_dropped') do |e|
         e['subject'] == "detail ##{detail['id']}" && e.dig('detail', 'item') == "item:#{old['id']}" && !e.dig('detail', 'reason').to_s.empty?
@@ -270,9 +291,14 @@ module HistoryComparison
       [detail['property'], detail['field'], custom_definition, detail['old_value'], detail['value'], detail['old_ref'], detail['value_ref']]
     end
 
-    def expected_detail(detail, new, cleared = nil)
+    def expected_detail(detail, new, cleared = nil, attachment = nil)
       result = detail.dup
       reasons = []
+      if attachment
+        result['prop_key'] = '0'
+        result['field'] = { 'missing_attachment' => '0' }
+        reasons << 'history_attachment_cleared [report.json; HistoryBuilder#translate_attachment]'
+      end
       if cleared
         cleared['detail']['missing'].each do |side|
           result[side == 'old' ? 'old_value' : 'value'] = nil
@@ -341,7 +367,8 @@ module HistoryComparison
           next
         end
         cleared = reference_evidence(old, detail, before['id'], 'history_reference_cleared')
-        expected, reasons = expected_detail(detail, new, cleared)
+        attachment = attachment_evidence(old, detail, before['id'])
+        expected, reasons = expected_detail(detail, new, cleared, attachment)
         index = remaining.index { |candidate| signature(actual_detail(candidate)) == signature(expected) }
         unless index
           @failures << "#{where} detail ##{detail['id']}: missing or changed #{detail['property']}/#{detail['field']}"
@@ -364,9 +391,81 @@ module HistoryComparison
       remaining.each { |detail| @failures << "#{where}: unexpected target detail ##{detail['id']} #{detail['property']}/#{detail['field']}" }
       # The aggregate renderer can group/reorder details. Do not ignore a
       # discrepancy that is absent from the individual renders.
-      [before, after].each do |journal|
-        if journal['details'].sort != journal['raw_details'].flat_map { |d| d['rendered'] }.sort
+      [[before, old], [after, new]].each do |journal, row|
+        next if journal['details'].sort == journal['raw_details'].flat_map { |d| d['rendered'] }.sort
+
+        if grouped_rendering?(journal, row['render_templates'])
+          explain('R5b multiple custom field values grouped in one line [IssuesHelper#details_to_strings]',
+                  "#{where} (journal ##{journal['id']})")
+        else
           @unexplained << "#{where}: aggregate rendering cannot be accounted for by individual details (journal ##{journal['id']})"
+        end
+      end
+    end
+
+    # R5b. Redmine 4.2 and 7 (IssuesHelper#details_to_strings) render every
+    # change of a journal on its own line except those of a multiple custom
+    # field: the values added to one such field go in one "added" line, and
+    # the removed ones in one "deleted" line, each list joined with ", ". The
+    # aggregate is accepted only if it is exactly those lines: the other
+    # changes as rendered alone, and for each multiple field the lines that
+    # hold exactly the multiset of its added and removed values (as the same
+    # renderer displays each one), in any order.
+    def grouped_rendering?(journal, templates)
+      return false unless templates
+
+      remaining = journal['details'].dup
+      take = lambda do |line|
+        index = remaining.index(line)
+        index && remaining.delete_at(index)
+      end
+      groups = {}
+      journal['raw_details'].each do |detail|
+        unless detail['property'] == 'cf' && detail['multiple']
+          return false unless detail['rendered'].all? { |line| take.call(line) }
+
+          next
+        end
+        group = (groups[detail['prop_key']] ||= { 'label' => detail['label'], 'added' => [], 'deleted' => [] })
+        return false unless group['label'] == detail['label']
+
+        # Redmine tests presence (nil), not emptiness.
+        { 'old_value' => %w[deleted display_old], 'value' => %w[added display_value] }.each do |side, (list, display)|
+          next if detail[side].nil?
+          return false unless detail[display].is_a?(String) && !detail[display].empty?
+
+          group[list] << detail[display]
+        end
+      end
+      groups.each_value do |group|
+        { 'added' => '%{value}', 'deleted' => '%{old}' }.each do |list, placeholder|
+          next if group[list].empty?
+
+          prefix, suffix = templates.fetch(list).gsub('%{label}') { group['label'] }.split(placeholder, 2)
+          return false unless suffix
+
+          line = remaining.find do |candidate|
+            candidate.start_with?(prefix) && candidate.end_with?(suffix) && candidate.length >= prefix.length + suffix.length &&
+              joined_values?(candidate[prefix.length...(candidate.length - suffix.length)], group[list])
+          end
+          return false unless line && take.call(line)
+        end
+      end
+      remaining.empty?
+    end
+
+    # Whether text is exactly the values (a multiset) joined with ", " in
+    # some order. Values may themselves hold ", ".
+    def joined_values?(text, values)
+      return text.empty? if values.empty?
+
+      values.uniq.any? do |value|
+        rest = values.dup
+        rest.delete_at(rest.index(value))
+        if rest.empty?
+          text == value
+        else
+          text.start_with?("#{value}, ") && joined_values?(text[(value.length + 2)..], rest)
         end
       end
     end

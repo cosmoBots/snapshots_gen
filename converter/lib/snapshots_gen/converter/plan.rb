@@ -38,6 +38,7 @@ module SnapshotsGen
         plan_data!
         plan_identities!
         report_data_sections!
+        report_generated_items!
         plan_positions!
         plan_catalog_and_relations!
         plan_fields!
@@ -442,6 +443,21 @@ module SnapshotsGen
         @items.each_value.select { |item| item.synthetic == 'data_section' }.each do |section|
           report.add('data_section_created', section.key, project: project_identifier(section.project_id), csid: section.csid,
                                                           data: @items.each_value.count { |item| item.parent_key == section.key })
+        end
+      end
+
+      # Every item that exists only in the new instance, with its final CSID,
+      # so a checker can tell it from a migrated item without reading this
+      # code: "Group: ..." chapters (from = the item they wrap), "Project
+      # data" chapters and their data (from = the requirement). Source items
+      # keep their identity_* entries.
+      def report_generated_items!
+        @items.each_value.select(&:synthetic?).sort_by(&:key).each do |item|
+          from = case item.synthetic
+                 when 'group', 'datum' then item.key.sub(/\Aitem:(group|datum)-/, 'item:')
+                 end
+          report.add('item_generated', item.key, kind: item.synthetic, project: project_identifier(item.project_id),
+                                                 csid: item.csid, from: from)
         end
       end
 

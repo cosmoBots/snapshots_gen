@@ -515,6 +515,116 @@ class CompareHistoryTest < Minitest::Test
     refute compare(source, target, proof).ok?
   end
 
+  def attachment_detail(prop_key, field, old, value, id: 1)
+    detail(field, old, value, id: id, property: 'attachment', key: prop_key, label: 'Fichero',
+                                rendered: [value ? "Añadido Fichero #{value}" : "Fichero eliminado (#{old})"])
+  end
+
+  def attachment_report(**overrides)
+    report('history_attachment_cleared', 'detail #1',
+           **{ item: 'item:1', csid: 'DEMO-0001', journal: 1, attachment: '9', missing: ['old'],
+               reason: 'deleted from the source', old_value: 'gone.txt', value: nil }.merge(overrides))
+  end
+
+  def test_attachment_cleared_needs_the_exact_report_entry_and_id_zero_in_the_target
+    before = attachment_detail('9', { 'missing_attachment' => '9' }, 'gone.txt', nil)
+    after = attachment_detail('0', { 'missing_attachment' => '0' }, 'gone.txt', nil, id: 7)
+    proof = attachment_report
+    result = compare_detail(before, after, proof)
+    assert result.ok?, (result.failures + result.unexplained).inspect
+    assert_equal 1, result.explained.keys.count { |reason| reason.start_with?('history_attachment_cleared') }
+
+    refute compare_detail(before, after).ok?, 'without the report entry'
+    { item: 'item:2', journal: 2, attachment: '8', missing: ['new'], old_value: 'other.txt', value: 'gone.txt',
+      reason: 'not migrated with this item' }.each do |key, wrong|
+      refute compare_detail(before, after, attachment_report(key => wrong)).ok?, key
+    end
+    wrong_subject = attachment_report
+    wrong_subject['entries'][0]['subject'] = 'detail #2'
+    refute compare_detail(before, after, wrong_subject).ok?, 'other detail'
+
+    # The target must say 0 and keep the file name and the rendering.
+    other = attachment_detail('5', { 'filename' => 'gone.txt', 'size' => 3, 'created' => nil }, 'gone.txt', nil, id: 7)
+    refute compare_detail(before, other, proof).ok?, 'target names a real attachment'
+    renamed = attachment_detail('0', { 'missing_attachment' => '0' }, 'renamed.txt', nil, id: 7)
+    refute compare_detail(before, renamed, proof).ok?, 'file name changed'
+    rendered = attachment_detail('0', { 'missing_attachment' => '0' }, 'gone.txt', nil, id: 7)
+    rendered['rendered'] = ['Fichero eliminado (otro)']
+    refute compare_detail(before, rendered, proof).ok?, 'rendering changed'
+  end
+
+  def test_attachment_not_migrated_with_its_item_needs_that_reason
+    present = { 'filename' => 'other.txt', 'size' => 3, 'created' => '2020-01-01T00:00:00.000000Z' }
+    before = attachment_detail('8', present, nil, 'other.txt')
+    after = attachment_detail('0', { 'missing_attachment' => '0' }, nil, 'other.txt', id: 7)
+    proof = attachment_report(attachment: '8', missing: ['new'], reason: 'not migrated with this item',
+                              old_value: nil, value: 'other.txt')
+    assert compare_detail(before, after, proof).ok?
+    refute compare_detail(before, after, attachment_report(attachment: '8', missing: ['new'], old_value: nil,
+                                                           value: 'other.txt')).ok?, 'deleted, but it exists'
+    # A deleted attachment cannot be explained as not migrated either.
+    gone = attachment_detail('9', { 'missing_attachment' => '9' }, 'gone.txt', nil)
+    refute compare_detail(gone, attachment_detail('0', { 'missing_attachment' => '0' }, 'gone.txt', nil, id: 7),
+                          attachment_report(reason: 'not migrated with this item')).ok?
+  end
+
+  def multiple_detail(id, old, value, label: 'Risk', multiple: true)
+    shown = value ? "Añadido #{label} #{value}" : "#{label} eliminado (#{old})"
+    row = detail('Risk', old, value, id: id, property: 'cf', key: '5', label: label, rendered: [shown])
+    row.merge!('field_format' => 'list', 'multiple' => multiple, 'display_old' => old, 'display_value' => value)
+  end
+
+  # Redmine 4.2 and 7 (IssuesHelper#details_to_strings) render the values
+  # added to one multiple custom field in one line, and the removed ones in
+  # another, after the other changes of the journal.
+  def grouped(details, lines)
+    source, target = item, item(101)
+    source['render_templates'] = target['render_templates'] = templates
+    source['journals'] = [journal(details)]
+    target['journals'] = [journal(copy(details).each_with_index.map { |row, index| row.merge('id' => 50 + index) }, '', 101)]
+    source['journals'][0]['details'] = lines
+    target['journals'][0]['details'] = copy(lines)
+    compare(source, target)
+  end
+
+  def test_r5b_grouped_multiple_values_are_explained_only_by_the_exact_multiset
+    details = [multiple_detail(1, nil, 'Alto'), multiple_detail(2, nil, 'Bajo'), multiple_detail(3, 'Medio', nil),
+               detail('subject', 'before', 'after', id: 4)]
+    lines = ['subject changed from before to after', 'Añadido Risk Alto, Bajo', 'Risk eliminado (Medio)']
+    result = grouped(details, lines)
+    assert result.ok?, result.unexplained.inspect
+    assert_equal 2, result.explained.select { |reason, _rows| reason.start_with?('R5b') }.values.flatten.length
+    assert grouped(details, lines.reverse).ok?, 'line order'
+    assert grouped(details, [lines[0], 'Añadido Risk Bajo, Alto', lines[2]]).ok?, 'value order'
+
+    {
+      'a value missing' => [lines[0], 'Añadido Risk Alto', lines[2]],
+      'a value repeated' => [lines[0], 'Añadido Risk Alto, Bajo, Bajo', lines[2]],
+      'a value changed' => [lines[0], 'Añadido Risk Alto, Medio', lines[2]],
+      'removed shown as added' => [lines[0], 'Añadido Risk Alto, Bajo, Medio'],
+      'another label' => [lines[0], 'Añadido Riesgo Alto, Bajo', lines[2]],
+      'a line missing' => lines.last(2),
+      'a line repeated' => lines + [lines[2]],
+      'not grouped but joined differently' => [lines[0], 'Añadido Risk Alto; Bajo', lines[2]]
+    }.each do |name, wrong|
+      refute grouped(details, wrong).ok?, name
+    end
+  end
+
+  def test_r5b_needs_a_multiple_field_and_the_same_count_of_each_value
+    single = [multiple_detail(1, nil, 'Alto', multiple: false), multiple_detail(2, nil, 'Bajo', multiple: false)]
+    refute grouped(single, ['Añadido Risk Alto, Bajo']).ok?, 'not a multiple field'
+    twice = [multiple_detail(1, nil, 'Alto'), multiple_detail(2, nil, 'Alto')]
+    assert grouped(twice, ['Añadido Risk Alto, Alto']).ok?
+    refute grouped(twice, ['Añadido Risk Alto']).ok?
+    commas = [multiple_detail(1, nil, 'a, b'), multiple_detail(2, nil, 'c')]
+    assert grouped(commas, ['Añadido Risk c, a, b']).ok?, 'a value with a comma'
+    refute grouped(commas, ['Añadido Risk a, b']).ok?
+    missing_display = [multiple_detail(1, nil, 'Alto'), multiple_detail(2, nil, 'Bajo')]
+    missing_display[1]['display_value'] = nil
+    refute grouped(missing_display, ['Añadido Risk Alto, Bajo']).ok?, 'no display value to prove it'
+  end
+
   def test_data_section_is_tied_to_a_project_with_reported_variables
     source, target, section = item, item(101), item(102, 'DEMO-0002')
     section.merge!('tracker' => 'csData', 'subject' => 'Project data', 'parent_id' => nil)
