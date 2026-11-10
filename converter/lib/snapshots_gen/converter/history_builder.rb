@@ -374,7 +374,9 @@ module SnapshotsGen
           return base.merge('property' => 'attr', 'prop_key' => native['field'],
                             'old_value' => mapped.call(detail['old_value']), 'value' => mapped.call(detail['value']))
         end
-        if Rules::DROPPED_ISSUE_FIELDS.key?(name) || Rules::DATUM_FIELDS.include?(name)
+        # rqVar and rqValue live on in the datum when they became one, and as
+        # custom fields of the item when they could not.
+        if Rules::DROPPED_ISSUE_FIELDS.key?(name) || (Rules::DATUM_FIELDS.include?(name) && @plan.datum_source?(item))
           return drop(detail, item, "#{name}: #{Rules::DROPPED_ISSUE_FIELDS[name] || 'turned into project data'}")
         end
         if Rules::DOCUMENT_REFERENCE_FIELDS.key?(name) && !@plan.kept_fields.key?(field['id'])

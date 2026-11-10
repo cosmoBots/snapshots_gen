@@ -46,7 +46,7 @@ Para otro reparto, añade `roles=rqReviewer:Reporter,...` a `importar history` (
 | `rqComplanceState`, `rqComplianceJustif` | estado y justificación del cumplimiento |
 | `rqVerif`, `rqVerifDescr` | métodos y descripción de la verificación |
 | `csOldCode`, `csWload` | código externo y carga de trabajo (`csExtCode`, `csWLoad`) |
-| `rqVar` y `rqValue` | un dato de proyecto (`csDatum`) con ese nombre y ese valor, bajo un capítulo "Project data" |
+| `rqVar` y `rqValue` | un dato de proyecto (`csDatum`) con ese nombre y ese valor, bajo un capítulo "Project data", si el nombre es un identificador que cosmoSys acepta (una letra seguida de letras, números o `_`) y no se repite en el árbol del proyecto; si no, o si solo hay `rqValue`, el requisito los conserva como campos personalizados `rqVar` y `rqValue`, con su historial. Un proyecto sin ningún dato no tiene capítulo "Project data" |
 | `rqAplDocs`, `rqRefDocs`, `rqComplianceDocs` | referencias del catálogo de documentos; el texto que no es una referencia se conserva como campo personalizado |
 | `csID`, `csChapter`, `depGrahInReports` | nada: el CSID y el capítulo son nativos, y la marca de informe no tiene equivalente |
 | cualquier otro campo personalizado | el mismo campo, con su definición |
