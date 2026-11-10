@@ -10,6 +10,8 @@ The tags package carries the tags of an old cosmoSys instance (the `additional_t
 
 It is one package for the whole instance, not one per tree: the tag catalog is global, and a tag can be on items of several trees and on wiki pages.
 
+It holds the name of every tag of the instance, the projects and CSIDs of the tagged items, the titles of the tagged wiki pages and the tag permissions of every role, so it is as confidential as the other packages: see "Material sensible" in the [migration procedure](procedimiento-migracion.md#material-sensible) (in Spanish) for how to keep, move and delete it.
+
 This document is the contract between the converter and the tags importer. `converter/lib/snapshots_gen/tags_package.rb` holds its writer, reader and verifier; it only needs `exporter/legacy_snapshot_format.rb` and rubyzip, so the importer can load it inside the new instance. `bin/verify-cstags` runs the verifier from the command line.
 
 ## What the package promises
