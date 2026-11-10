@@ -49,7 +49,8 @@ module SnapshotsGen
             'items' => content.fetch('projects').sum { |project| project.fetch('items').length } }
         end
         history_dir = File.join(out, ".#{label}.history")
-        HistoryBuilder.new(plan, csys_packages: packages.map { |package| package.except('path') }).write(history_dir)
+        history = HistoryBuilder.new(plan, csys_packages: packages.map { |package| package.except('path') })
+        history.write(history_dir)
         history_path = File.join(out, "#{label}.cshistory")
         LegacySnapshot::Writer.zip_directory(history_dir, history_path)
         FileUtils.rm_rf(history_dir)
@@ -57,7 +58,7 @@ module SnapshotsGen
         raise Error, "the history package does not verify: #{result.errors.first(5).join('; ')}" unless result.ok?
 
         tags_path = File.join(out, "#{label}.cstags")
-        tags = TagsBuilder.new(plan, history_path: history_path, csys: packages).build
+        tags = TagsBuilder.new(plan, history_path: history_path, csys: packages, dropped_tag_changes: history.dropped_tag_changes).build
         tags.write(tags_path)
         tags_result = TagsPackage::Verifier.new(tags_path).verify(history: history_path, csys: packages.map { |package| package['path'] })
         raise Error, "the tags package does not verify: #{tags_result.errors.first(5).join('; ')}" unless tags_result.ok?

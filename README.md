@@ -6,7 +6,7 @@ The tool has three pieces, each of which knows only one side:
 
 - `exporter/`: runs inside the old instance with `rails runner` (Ruby 2.7, Rails 5.2). It only reads, installs nothing and restarts nothing. It writes a lossless legacy snapshot: every table by name, the attachment files and a report of what it could not capture.
 - `converter/`: runs with a current Ruby, outside both instances. It turns a legacy snapshot into a `.csys` package per root project that the cosmoSys import accepts, a history package, a tags package (`.cstags`) and a conversion report.
-- `importer/`: runs inside the new instance with `rails runner`. Before the `.csys` import it creates users with their passwords, groups and custom fields; it runs the `.csys` import with the cosmoSys preflight; after it, before anyone works there, it writes the history (notes, changes, wiki versions, time entries and watchers) and restores the original authors and dates; and last it writes the tags, exactly as they were, into the tag plugin of the new instance.
+- `importer/`: runs inside the new instance with `rails runner`. Before the `.csys` import it creates users with their passwords, groups and custom fields; it runs the `.csys` import with the cosmoSys preflight; after it, before anyone works there, it writes the history (notes, changes, wiki versions, time entries and watchers) and restores the original authors and dates; and last it writes the tags, exactly as they were, into the tag plugin of the new instance, and gives each role the tag permissions its old role had.
 
 The legacy snapshot format is specified in [docs/legacy-snapshot-format.md](docs/legacy-snapshot-format.md).
 
@@ -41,7 +41,7 @@ bin/verify-cstags PACKAGE.cstags history=PACKAGE.cshistory csys=ROOT.csys ...
 
 The tags package is specified in [docs/cstags-format.md](docs/cstags-format.md).
 
-`test/legacy_env/` runs disposable old instances (MySQL 5.7 and Redmine 4.2.10) on a copied or synthetic application tree, `test/legacy_env/synthesize.rb` fills one with invented history, `test/e2e.sh` runs the whole migration on a disposable new instance, and `test/importer_tags_e2e.sh` imports the synthetic tags of `test/importer_tags_fixture.rb` (case variants, commas, composed and decomposed accents, emoji, 255 characters, an unused tag, tag changes in the history) and compares what PostgreSQL holds byte by byte.
+`test/legacy_env/` runs disposable old instances (MySQL 5.7 and Redmine 4.2.10) on a copied or synthetic application tree, `test/legacy_env/synthesize.rb` fills one with invented history, `test/e2e.sh` runs the whole migration on a disposable new instance, and `test/importer_tags_e2e.sh` imports the synthetic tags of `test/importer_tags_fixture.rb` (case variants, commas, composed and decomposed accents, emoji, 255 characters, an unused tag, tag changes in the history, roles with and without tag permissions) and compares what PostgreSQL holds byte by byte; it also checks the refusals, a second pass, the tag permissions given to the roles and that a history of another package is refused. `test/exporter_inventory_test.rb` checks the tag counts of the inventory.
 
 ## License
 

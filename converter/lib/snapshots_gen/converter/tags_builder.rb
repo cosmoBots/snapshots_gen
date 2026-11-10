@@ -22,10 +22,7 @@ module SnapshotsGen
         'use_colors' => 1
       }.freeze
       BOOLEAN_SETTINGS = %w[active_issue_tags active_wiki_tags open_issues_only show_with_count].freeze
-      CHOICE_SETTINGS = {
-        'tags_sidebar' => %w[none list cloud simple_cloud], 'tags_sort_by' => %w[name count],
-        'tags_sort_order' => %w[asc desc], 'tags_suggestion_order' => %w[name last_created count]
-      }.freeze
+      CHOICE_SETTINGS = TagsPackage::CHOICE_SETTINGS
       # Destination key => old key whose value it takes, translated.
       MAPPED_SETTINGS = { 'tags_color_theme' => 'use_colors' }.freeze
       # Destination keys without an old equivalent: the destination default.
@@ -36,11 +33,14 @@ module SnapshotsGen
 
       # csys: [{ 'path', 'root_identifier', 'content_sha256' }] of every
       # sibling .csys; history_path: the sibling .cshistory, already written.
-      def initialize(plan, history_path:, csys:)
+      # dropped_tag_changes: the tag changes of the history that the history
+      # package could not keep (HistoryBuilder#dropped_tag_changes).
+      def initialize(plan, history_path:, csys:, dropped_tag_changes: [])
         @plan = plan
         @source = plan.source
         @history_path = history_path
         @csys = csys
+        @dropped_tag_changes = dropped_tag_changes
         @anomalies = []
       end
 
@@ -58,9 +58,14 @@ module SnapshotsGen
         check_objects(objects, taggings)
         settings = resolve_settings
         check_visibility(settings, taggings)
+        roles = role_rows
+        @dropped_tag_changes.each do |entry|
+          anomaly('history_tag_change_dropped', 'history', entry.fetch('detail_ids'),
+                  "journal #{entry.fetch('journal_id')} of Issue:#{entry.fetch('issue_id')}: #{entry.fetch('reason').tr('_', ' ')}")
+        end
         anomalies = @anomalies.sort_by { |row| TagsPackage.anomaly_sort_key(row) }.each_with_index.map { |row, index| row.merge('id' => index + 1) }
         @rows = { 'tags' => tags, 'taggings' => taggings, 'objects' => objects.values.sort_by { |row| TagsPackage.object_sort_key(row) },
-                  'anomalies' => anomalies }
+                  'roles' => roles, 'anomalies' => anomalies }
         @content = {
           'captured_at' => @source.content.fetch('captured_at'),
           'generator' => HistoryBuilder::GENERATOR,
@@ -90,7 +95,8 @@ module SnapshotsGen
         counts = TagsPackage.counts(@rows)
         report.add('tags_information', 'package', importable: @content['importable'],
                                                   **counts.slice('source_tags', 'source_taggings', 'objects', 'tagged_objects',
-                                                                 'unused_tags').transform_keys(&:to_sym))
+                                                                 'unused_tags', 'source_roles', 'roles_with_tag_permissions')
+                                                          .transform_keys(&:to_sym))
         @rows.fetch('anomalies').group_by { |row| row['code'] }.sort.each do |code, rows|
           severity, meaning = TagsPackage::ANOMALIES.fetch(code)
           ids = rows.flat_map { |row| row['source_ids'] }.first(20)
@@ -241,6 +247,20 @@ module SnapshotsGen
 
           anomaly('case_variant_names', 'tags', group.map { |row| row_id(row) }, "#{group.length} names equal except for case")
         end
+        # The 4.6.0 plugin reads the tag field of a form as a comma separated
+        # list, so the first ordinary edit of the object splits these names.
+        tags.each do |row|
+          next unless row['name'].is_a?(String) && row['name'].include?(TagsPackage::LIST_SEPARATOR)
+
+          anomaly('comma_in_name', 'tags', [row_id(row)], 'name has a comma')
+        end
+        tags.each do |row|
+          problems = %w[created_at updated_at].filter_map do |key|
+            value = row[key]
+            "#{key}: #{value.nil? ? 'missing' : TagsPackage.timestamp_problem(value)}" if value.nil? || TagsPackage.timestamp_problem(value)
+          end
+          anomaly('invalid_timestamp', 'tags', [row_id(row)], problems.join('; ')) if problems.any?
+        end
         counts = taggings.group_by { |row| row['tag_id'] }.transform_values(&:length)
         TagsPackage.tags_by_id(tags).each do |id, row|
           real = counts.fetch(id, 0)
@@ -256,6 +276,9 @@ module SnapshotsGen
         by_id = TagsPackage.tags_by_id(tags)
         taggings.each do |row|
           id = [row_id(row)]
+          if !row['created_at'].nil? && (problem = TagsPackage.timestamp_problem(row['created_at']))
+            anomaly('invalid_timestamp', 'taggings', id, "created_at: #{problem}")
+          end
           anomaly('orphan_tag', 'taggings', id, row['tag_id'].nil? ? 'null tag_id' : 'tag_id names no unique tag') unless by_id.key?(row['tag_id'])
           unless row['context'] == TagsPackage::PROFILE['implicit_context']
             anomaly('unsupported_context', 'taggings', id, row['context'].nil? ? 'null context' : 'context other than "tags"')
@@ -300,6 +323,29 @@ module SnapshotsGen
 
           code = group.any? { |row| tagged.include?(row['id']) } ? 'ambiguous_object' : 'ambiguous_untagged_object'
           anomaly(code, 'objects', group.map { |row| row['id'] }, "#{group.length} objects with one destination identity")
+        end
+      end
+
+      # Every source role, with the tag permissions it had (docs/cstags-format.md,
+      # "tables/roles.jsonl"). Only those four names are carried; the rest of
+      # the permissions are not part of this package.
+      def role_rows
+        unless @source.table?('roles')
+          anomaly('unreadable_role_permissions', 'roles', [], 'the legacy snapshot has no roles table')
+          return []
+        end
+        columns = @source.table_entry('roles').fetch('columns').map { |column| column.fetch('name') }
+        unless columns.include?('permissions')
+          anomaly('unreadable_role_permissions', 'roles', [], 'the roles table has no permissions column')
+        end
+        @source.raw_table('roles').each_with_index.map do |row, index|
+          permissions = columns.include?('permissions') ? TagsPackage.tag_permissions(row['permissions']) : nil
+          if permissions.nil? && columns.include?('permissions')
+            anomaly('unreadable_role_permissions', 'roles', [row['id'].nil? ? "ordinal:#{index + 1}" : row['id']],
+                    'permissions are not a plain YAML list')
+          end
+          { 'id' => row['id'], 'name' => row['name'], 'builtin' => row['builtin'].is_a?(Integer) ? row['builtin'] : nil,
+            'tag_permissions' => permissions, 'ordinal' => index + 1 }
         end
       end
 

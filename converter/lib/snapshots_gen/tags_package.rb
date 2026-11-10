@@ -5,9 +5,11 @@
 # It only depends on the legacy snapshot format (canonical JSON) and rubyzip,
 # so it runs under the converter's Ruby and inside the new instance.
 
+require 'date'
 require 'digest'
 require 'json'
 require 'set'
+require 'yaml'
 require 'zip'
 require_relative '../../../exporter/legacy_snapshot_format'
 
@@ -20,6 +22,7 @@ module SnapshotsGen
       'tags' => 'tables/tags.jsonl',
       'taggings' => 'tables/taggings.jsonl',
       'objects' => 'tables/objects.jsonl',
+      'roles' => 'tables/roles.jsonl',
       'anomalies' => 'reports/anomalies.jsonl'
     }.freeze
     # The only profile of version 1. Every field is part of the meaning of the
@@ -36,14 +39,15 @@ module SnapshotsGen
       'tags' => %w[created_at id name ordinal source_extra source_taggings_count updated_at],
       'taggings' => %w[context created_at id object_id ordinal source_extra tag_id taggable_id taggable_type tagger_id tagger_type],
       'objects' => %w[id source_id source_order source_type target untargeted_reason],
+      'roles' => %w[builtin id name ordinal tag_permissions],
       'anomalies' => %w[code id reason severity source_ids table]
     }.freeze
     CONTENT_KEYS = %w[captured_at counts dependencies files generator importable profile source].freeze
     SOURCE_KEYS = %w[legacy_snapshot_sha256 plugins settings settings_provenance table_descriptors tables_present].freeze
     DEPENDENCY_KEYS = %w[csys_packages history_content_sha256 history_sha256].freeze
     COUNT_KEYS = %w[blocking_anomalies distinct_contexts duplicate_projection_groups information_anomalies issue_objects
-                    non_null_taggers objects source_taggings source_tags tagged_objects unsupported_objects unused_tags
-                    warning_anomalies wiki_objects].freeze
+                    non_null_taggers objects roles_with_tag_permissions source_roles source_taggings source_tags
+                    tagged_objects unsupported_objects unused_tags warning_anomalies wiki_objects].freeze
     SOURCE_TABLES = { 'tags' => 'additional_tags', 'taggings' => 'additional_taggings' }.freeze
     # Columns of the old plugin (fork 1.0.4) that the rows carry by name.
     # Any other column goes to source_extra and blocks the import.
@@ -52,7 +56,15 @@ module SnapshotsGen
       'additional_taggings' => %w[id tag_id taggable_id taggable_type tagger_id tagger_type context created_at]
     }.freeze
     TAGGABLE_TYPES = %w[Issue WikiPage].freeze
+    # The tag permissions of a role: the same names in the fork 1.0.4 and in
+    # 4.6.0 (init.rb of both). The package carries which of them each source
+    # role had, so the importer can give them to the destination roles.
+    TAG_PERMISSIONS = %w[add_wiki_tags create_issue_tags edit_issue_tags view_issue_tags].freeze
+    # Role.builtin in Redmine: 0 a role given to members, 1 Non member, 2 Anonymous.
+    BUILTIN_ROLES = { 1 => 'non_member', 2 => 'anonymous' }.freeze
+    LIST_SEPARATOR = ','
     MAX_NAME_LENGTH = 255
+    BLANK = /\A[[:space:]]*\z/.freeze
     SCOPE_SEPARATOR = '::'
     GROUP_SEPARATOR = ':'
 
@@ -60,6 +72,14 @@ module SnapshotsGen
     SETTING_KEYS = %w[active_issue_tags active_wiki_tags open_issues_only show_tags_after_queries show_with_count
                       tags_color_theme tags_sidebar tags_sort_by tags_sort_order tags_suggestion_order].freeze
     CRITICAL_SETTINGS = %w[active_issue_tags active_wiki_tags].freeze
+    # The values each setting may hold in 4.6.0: switches are "0" or "1".
+    CHOICE_SETTINGS = {
+      'tags_sidebar' => %w[none list cloud simple_cloud], 'tags_sort_by' => %w[name count],
+      'tags_sort_order' => %w[asc desc], 'tags_suggestion_order' => %w[name last_created count]
+    }.freeze
+    SETTING_DOMAINS = SETTING_KEYS.to_h { |key| [key, CHOICE_SETTINGS.fetch(key, %w[0 1])] }.freeze
+    # Datetimes as the legacy snapshot writes them: UTC with microseconds.
+    TIMESTAMP = /\A(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{6})Z\z/.freeze
     SETTING_ENTRY_KEYS = %w[provenance source_key source_value value].freeze
     PROVENANCES = %w[stored default mapped destination_default unavailable].freeze
     SETTINGS_PROVENANCES = %w[stored plugin_defaults incomplete].freeze
@@ -85,16 +105,20 @@ module SnapshotsGen
       'duplicate_projection' => ['blocking', 'Taggings that collapse into one in the destination (same object and name)'],
       'ambiguous_object' => ['blocking', 'Tagged objects whose destination identity is not unique'],
       'missing_settings' => ['blocking', 'Tag activation settings that cannot be determined'],
+      'history_tag_change_dropped' => ['blocking', 'Tag changes in the history of items absorbed into documents or not in the source: the history cannot keep them'],
       'ambiguous_untagged_object' => ['warning', 'Untagged objects whose destination identity is not unique'],
       'invalid_setting' => ['warning', 'Tag display settings that cannot be determined (the destination default stays)'],
       'tags_not_visible' => ['warning', 'Tagged object types whose tags are switched off in the settings'],
       'unused_tag' => ['warning', 'Tags without taggings: imported, but the new plugin deletes unused tags after edits'],
       'case_variant_names' => ['warning', 'Names equal except for case: kept apart, but the new tag API matches them as one'],
       'scoped_tag_conflict' => ['warning', 'Objects with two tags of the same "group::" scope, which the new plugin rejects on edit'],
+      'comma_in_name' => ['warning', 'Names with a comma: kept as one tag, but the new plugin splits them at the comma when the object is edited'],
+      'unreadable_role_permissions' => ['warning', 'Roles whose permissions cannot be read: no tag permission is given for them'],
+      'invalid_timestamp' => ['blocking', 'Tag or tagging dates that are not a valid timestamp (or a missing tag date, which the destination requires)'],
       'counter_mismatch' => ['information', 'Tags whose stored taggings_count differs from their real count (recomputed on import)']
     }.freeze
     SEVERITIES = %w[blocking warning information].freeze
-    ANOMALY_TABLES = %w[tags taggings objects settings].freeze
+    ANOMALY_TABLES = %w[tags taggings objects roles settings history].freeze
 
     MAX_ENTRY_BYTES = 1 << 30
 
@@ -112,11 +136,35 @@ module SnapshotsGen
       text = name.dup.force_encoding(Encoding::UTF_8)
       return ['invalid_name', 'empty'] if text.empty?
       return ['invalid_name', 'contains U+0000'] if text.include?("\u0000")
-      return ['invalid_name', 'only spaces'] if text.strip.empty?
+      # String#blank? of ActiveSupport: the TagList of 4.6.0 drops these
+      # names, which String#strip alone would not see (U+00A0, U+3000...).
+      return ['invalid_name', 'only spaces'] if text.strip.empty? || BLANK.match?(text)
       return ['invalid_name', 'leading or trailing spaces'] if text.strip != text
       return ['invalid_name', "longer than #{MAX_NAME_LENGTH} characters"] if text.length > MAX_NAME_LENGTH
 
       nil
+    end
+
+    # nil when value is a datetime of the format that exists in the calendar
+    # (no 31 February, no hour 24), or the reason it is not.
+    def timestamp_problem(value)
+      match = value.is_a?(String) && TIMESTAMP.match(value)
+      return 'not a UTC datetime with microseconds' unless match
+
+      year, month, day, hour, minute, second = match.captures.first(6).map(&:to_i)
+      return 'not a calendar date' unless Date.valid_date?(year, month, day)
+      return 'not a time of the day' unless hour < 24 && minute < 60 && second < 60
+
+      nil
+    end
+
+    # The Time of a valid timestamp; raises Error otherwise, never normalizes.
+    def parse_time(value)
+      problem = timestamp_problem(value)
+      raise Error, problem if problem
+
+      parts = TIMESTAMP.match(value).captures.map(&:to_i)
+      Time.utc(*parts.first(6), parts.last)
     end
 
     # Exact identity of a name inside the package: the string itself, or the
@@ -163,10 +211,33 @@ module SnapshotsGen
       end.values.select { |rows| rows.length > 1 }
     end
 
+    # The tag permissions of a role from the YAML that Redmine stores in
+    # roles.permissions (a list of symbols), or nil when it cannot be read.
+    # It walks the YAML tree and never builds Ruby objects from it: only a
+    # plain list of plain scalars is accepted.
+    def tag_permissions(raw)
+      return [] if raw.nil?
+      return nil unless raw.is_a?(String) && raw.dup.force_encoding(Encoding::UTF_8).valid_encoding?
+
+      document = Psych.parse(raw.dup.force_encoding(Encoding::UTF_8))
+      # An empty value or a YAML null: a role without permissions.
+      return [] if !document || (document.root.is_a?(Psych::Nodes::Scalar) && document.root.tag.nil? &&
+                                 ['', '~', 'null'].include?(document.root.value))
+
+      list = document.root
+      return nil unless list.is_a?(Psych::Nodes::Sequence) && list.tag.nil?
+      return nil unless list.children.all? { |node| node.is_a?(Psych::Nodes::Scalar) && node.tag.nil? }
+
+      (list.children.map { |node| node.value.delete_prefix(':') } & TAG_PERMISSIONS).sort
+    rescue Psych::Exception
+      nil
+    end
+
     def counts(rows)
       tags = rows.fetch('tags')
       taggings = rows.fetch('taggings')
       objects = rows.fetch('objects')
+      roles = rows.fetch('roles')
       anomalies = rows.fetch('anomalies')
       used = taggings.map { |row| row['tag_id'] }.to_set
       severity = anomalies.group_by { |row| row['severity'] }.transform_values(&:length)
@@ -182,6 +253,8 @@ module SnapshotsGen
         'distinct_contexts' => taggings.map { |row| row['context'] }.uniq.length,
         'non_null_taggers' => taggings.count { |row| !row['tagger_id'].nil? || !row['tagger_type'].nil? },
         'duplicate_projection_groups' => projection_groups(tags, taggings).length,
+        'source_roles' => roles.length,
+        'roles_with_tag_permissions' => roles.count { |row| row['tag_permissions'].is_a?(Array) && row['tag_permissions'].any? },
         'blocking_anomalies' => severity.fetch('blocking', 0),
         'warning_anomalies' => severity.fetch('warning', 0),
         'information_anomalies' => severity.fetch('information', 0)
@@ -272,8 +345,9 @@ module SnapshotsGen
         check_rows(rows)
         check_counts(manifest.fetch('content'), rows)
         check_source(manifest.fetch('content').fetch('source'))
+        check_descriptors(manifest.fetch('content').fetch('source'), rows)
         check_profile(manifest.fetch('content'), rows) if manifest.dig('content', 'importable') == true
-        check_dependencies(manifest.fetch('content').fetch('dependencies'), history, csys)
+        check_dependencies(manifest.fetch('content').fetch('dependencies'), history, csys, rows.fetch('objects'))
         Result.new(@errors, manifest, @errors.empty? ? rows : nil)
       rescue Zip::Error, JSON::ParserError, SystemCallError, Error, KeyError, TypeError, NoMethodError, ArgumentError => error
         Result.new(@errors + ["malformed package: #{error.class}: #{error.message}"], nil, nil)
@@ -411,15 +485,27 @@ module SnapshotsGen
       end
 
       def check_rows(rows)
-        %w[tags taggings].each do |name|
+        %w[tags taggings roles].each do |name|
           rows.fetch(name).each_with_index do |row, index|
             @errors << "#{FILES[name]}:#{index + 1} has ordinal #{row['ordinal'].inspect}" unless row['ordinal'] == index + 1
+            next if name == 'roles'
+
             @errors << "#{FILES[name]}:#{index + 1} has a source_extra that is not an object" unless row['source_extra'].is_a?(Hash)
           end
         end
+        rows.fetch('roles').each_with_index { |row, index| check_role(row, "#{FILES['roles']}:#{index + 1}") }
         objects = rows.fetch('objects')
         ids = objects.map { |row| row['id'] }
         @errors << 'objects repeat an id' unless ids.uniq.length == ids.length
+        pairs = objects.map { |row| [row['source_type'], row['source_id']] }
+        @errors << 'objects repeat a source type and id' unless pairs.uniq.length == pairs.length
+        objects.each do |row|
+          if row['id'].to_s.start_with?('unsupported:')
+            @errors << "object #{row['id']} is unsupported without the reason unsupported_type" unless row['untargeted_reason'] == 'unsupported_type'
+          elsif row['id'] != "#{row['source_type']}:#{row['source_id']}"
+            @errors << "object #{row['id']} has an id that is not its source type and id"
+          end
+        end
         @errors << 'objects are out of order' unless objects == objects.sort_by { |row| TagsPackage.object_sort_key(row) }
         objects.each { |row| check_object(row) }
         known = ids.to_set
@@ -438,6 +524,36 @@ module SnapshotsGen
         end
         sorted = anomalies.sort_by { |row| TagsPackage.anomaly_sort_key(row) }
         @errors << 'anomalies are out of order' unless anomalies.map { |row| row['id'] } == sorted.map { |row| row['id'] }
+      end
+
+      def check_role(row, location)
+        @errors << "#{location} has a builtin that is not an integer" unless row['builtin'].nil? || row['builtin'].is_a?(Integer)
+        permissions = row['tag_permissions']
+        valid = permissions.nil? || (permissions.is_a?(Array) && permissions == permissions.uniq.sort &&
+                                     permissions.all? { |permission| TAG_PERMISSIONS.include?(permission) })
+        @errors << "#{location} has tag_permissions that are not a sorted list of tag permissions" unless valid
+      end
+
+      # Every object with a target is the item or wiki page of the history
+      # with the same source id, and the target says what that row says: an
+      # item by key, project and CSID, a page by project and exact title.
+      def check_history_identities(history, manifest, objects)
+        tables = %w[projects items wiki_pages].to_h do |name|
+          entry = manifest.dig('content', 'tables').find { |table| table['name'] == name }
+          rows = entry ? Zip::File.open(history) { |zip| zip.read(entry.fetch('path')) }.force_encoding(Encoding::UTF_8).lines.map { |line| JSON.parse(line) } : []
+          [name, rows.group_by { |row| row['id'] }]
+        end
+        projects = tables.fetch('projects').transform_values { |rows| rows.length == 1 ? rows.first['identifier'] : nil }
+        objects.each do |row|
+          target = row['target']
+          next unless target.is_a?(Hash)
+
+          found = tables.fetch(row['source_type'] == 'Issue' ? 'items' : 'wiki_pages').fetch(row['source_id'], [])
+          source = found.first if found.length == 1
+          same = source && projects[source['project_id']] == target['project_identifier'] &&
+                 (row['source_type'] == 'Issue' ? source['key'] == target['item_key'] && source['csid'] == target['csid'] : source['title'] == target['title'])
+          @errors << "object #{row['id']} does not match the history (#{row['source_type'] == 'Issue' ? 'item' : 'wiki page'} with the same source id)" unless same
+        end
       end
 
       def check_object(row)
@@ -479,8 +595,43 @@ module SnapshotsGen
           valid = entry.is_a?(Hash) && entry.keys.sort == SETTING_ENTRY_KEYS && PROVENANCES.include?(entry['provenance']) &&
                   (entry['value'].nil? || entry['value'].is_a?(String)) && (entry['value'].nil? == (entry['provenance'] == 'unavailable'))
           @errors << "setting #{key} is malformed" unless valid
+          next if !valid || entry['value'].nil? || SETTING_DOMAINS.fetch(key).include?(entry['value'])
+
+          @errors << "setting #{key} has a value outside its domain"
         end
         @errors << 'settings_provenance is unknown' unless SETTINGS_PROVENANCES.include?(source['settings_provenance'])
+      end
+
+      # The descriptors are the evidence of the source tables: one per present
+      # table, with as many rows as the package carries, and columns that
+      # differ from the known ones only with their missing_column or
+      # unknown_column anomaly.
+      def check_descriptors(source, rows)
+        present = source['tables_present']
+        descriptors = source['table_descriptors']
+        return unless present.is_a?(Hash) && descriptors.is_a?(Array)
+
+        names = descriptors.map { |entry| entry.is_a?(Hash) ? entry['name'] : nil }
+        unless names == present.select { |_name, ok| ok == true }.keys.sort
+          @errors << 'table_descriptors does not describe exactly the present tables'
+          return
+        end
+        codes = rows.fetch('anomalies').map { |row| row['code'] }
+        SOURCE_TABLES.each do |file, table|
+          entry = descriptors.find { |descriptor| descriptor['name'] == table }
+          unless entry
+            @errors << "#{FILES[file]} has rows of the absent table #{table}" if rows.fetch(file).any?
+            next
+          end
+          @errors << "#{table} declares #{entry['rows'].inspect} rows; the package has #{rows.fetch(file).length}" unless entry['rows'] == rows.fetch(file).length
+          columns = Array(entry['columns']).map { |column| column.is_a?(Hash) ? column['name'] : nil }
+          known = KNOWN_COLUMNS.fetch(table)
+          missing = known - columns
+          extra = columns - known
+          if (missing.any? && !codes.include?('missing_column')) || (extra.any? && !codes.include?('unknown_column'))
+            @errors << "#{table} has columns #{columns.inspect} without the anomaly that says so"
+          end
+        end
       end
 
       # An importable package must satisfy the strict profile row by row; this
@@ -503,6 +654,13 @@ module SnapshotsGen
         names = tags.map { |row| TagsPackage.name_key(row['name']) }
         problems << 'two tags share a name' unless names.uniq.length == names.length
         problems << 'a row has source_extra' if (tags + taggings).any? { |row| !row['source_extra'].empty? }
+        problems << 'a tag has no creation or update time' if tags.any? { |row| row['created_at'].nil? || row['updated_at'].nil? }
+        if tags.any? { |row| [row['created_at'], row['updated_at']].compact.any? { |value| TagsPackage.timestamp_problem(value) } }
+          problems << 'a tag has a date that is not a valid timestamp'
+        end
+        if taggings.any? { |row| !row['created_at'].nil? && TagsPackage.timestamp_problem(row['created_at']) }
+          problems << 'a tagging has a date that is not a valid timestamp'
+        end
         by_id = TagsPackage.tags_by_id(tags)
         taggings.each do |row|
           object = objects[row['object_id']]
@@ -525,7 +683,7 @@ module SnapshotsGen
         problems.uniq.each { |problem| @errors << "importable package breaks the strict profile: #{problem}" }
       end
 
-      def check_dependencies(dependencies, history, csys)
+      def check_dependencies(dependencies, history, csys, objects)
         @errors << "dependencies has keys #{dependencies.keys.sort.inspect}" unless dependencies.keys.sort == DEPENDENCY_KEYS
         if history
           result = LegacySnapshot::Verifier.new(history).verify
@@ -534,6 +692,8 @@ module SnapshotsGen
           elsif result.manifest['content_sha256'] != dependencies['history_content_sha256'] ||
                 Digest::SHA256.file(history).hexdigest != dependencies['history_sha256']
             @errors << 'the history package is not the one this tags package was converted with'
+          else
+            check_history_identities(history, result.manifest, objects)
           end
         end
         return unless csys

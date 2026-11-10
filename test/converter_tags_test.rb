@@ -82,7 +82,11 @@ class ConverterTagsTest < Minitest::Test
       assert package.importable?, package.rows.fetch('anomalies').inspect
       assert_equal true, summary['tags_importable']
       assert_equal 'test.cstags', summary['tags_package']
-      assert_equal %w[case_variant_names counter_mismatch unused_tag], codes(package).keys.sort
+      assert_equal %w[case_variant_names comma_in_name counter_mismatch unused_tag], codes(package).keys.sort
+      # Only "A,B" has a comma; it stays one tag and is reported.
+      comma = package.rows.fetch('anomalies').select { |row| row['code'] == 'comma_in_name' }
+      assert_equal [[1]], comma.map { |row| row['source_ids'] }
+      assert_equal 'warning', comma.first['severity']
 
       # Every name exactly as stored, also the unused one.
       assert_equal names, package.rows.fetch('tags').map { |row| row['name'] }
@@ -132,10 +136,232 @@ class ConverterTagsTest < Minitest::Test
 
       # The conversion report counts codes and never names a tag.
       assert_equal 0, report['counts'].fetch('tags_blocking', 0)
-      assert_equal 2, report['counts']['tags_warning']
+      assert_equal 3, report['counts']['tags_warning']
+      assert_includes report['entries'].map { |entry| entry['subject'] }, 'comma_in_name'
       dumped = JSON.generate(report)
       names.each { |name| refute_includes dumped, JSON.generate(name)[1..-2] if name.length > 3 }
       refute(report['entries'].any? { |entry| entry['code'] == 'plugin_data_not_migrated' && entry['subject'].start_with?('additional_') })
+    end
+  end
+
+  # R1 of the adversarial review: a tag removed from an item that is absorbed
+  # into a document, or whose item is not in the source, leaves no current
+  # tagging; its change in the history must not disappear in silence.
+  def test_tag_changes_in_the_history_of_items_that_are_not_migrated_block
+    tables = tag_tables([tag(1, 'one', 1)], [tagging(1, 1, 'Issue', 1)])
+    tables['journals'] = [
+      { 'id' => 98, 'journalized_id' => 1, 'journalized_type' => 'Issue', 'user_id' => 1, 'notes' => '', 'private_notes' => false, 'created_on' => TIME },
+      { 'id' => 99, 'journalized_id' => 5, 'journalized_type' => 'Issue', 'user_id' => 1, 'notes' => '', 'private_notes' => false, 'created_on' => TIME },
+      { 'id' => 100, 'journalized_id' => 999, 'journalized_type' => 'Issue', 'user_id' => 1, 'notes' => 'x', 'private_notes' => false, 'created_on' => TIME },
+      { 'id' => 101, 'journalized_id' => 5, 'journalized_type' => 'Issue', 'user_id' => 1, 'notes' => 'only a note', 'private_notes' => false,
+        'created_on' => TIME }
+    ]
+    tables['journal_details'] = [
+      { 'id' => 1, 'journal_id' => 98, 'property' => 'attr', 'prop_key' => 'tag_list', 'old_value' => '', 'value' => 'one' },
+      { 'id' => 2, 'journal_id' => 99, 'property' => 'attr', 'prop_key' => 'tag_list', 'old_value' => 'synthetic-old-tag', 'value' => '' },
+      { 'id' => 3, 'journal_id' => 99, 'property' => 'attr', 'prop_key' => 'subject', 'old_value' => 'a', 'value' => 'b' },
+      { 'id' => 4, 'journal_id' => 100, 'property' => 'attr', 'prop_key' => 'tag_list', 'old_value' => 'gone', 'value' => '' }
+    ]
+    convert(tables) do |package, summary, report|
+      refute package.importable?
+      assert summary['blocking']
+      assert_equal %w[history_tag_change_dropped], blocking(package)
+      dropped = package.rows.fetch('anomalies').select { |row| row['code'] == 'history_tag_change_dropped' }
+      assert_equal [[2], [4]], dropped.map { |row| row['source_ids'] }
+      assert_equal %w[history history], dropped.map { |row| row['table'] }
+      assert_equal ['journal 99 of Issue:5: absorbed into document', 'journal 100 of Issue:999: not in source'], dropped.map { |row| row['reason'] }
+      entry = report['entries'].find { |row| row['code'] == 'tags_blocking' && row['subject'] == 'history_tag_change_dropped' }
+      assert_equal 2, entry['detail']['records']
+      refute_includes JSON.generate(report), 'synthetic-old-tag'
+    end
+  end
+
+  # R5 of the adversarial review: names made only of Unicode spaces are blank
+  # for ActiveSupport, and the TagList of 4.6.0 drops them; a valid name with
+  # a no-break space inside or at an edge stays as it is.
+  def test_names_of_unicode_spaces_only_block
+    tags = [tag(1, "\u00a0"), tag(2, "\u2003"), tag(3, "\u3000\u00a0"), tag(4, "no\u00a0break"), tag(5, "edge\u00a0")]
+    # Issue 5 is absorbed into a document: the last tag goes to issue 6.
+    taggings = tags.map { |row| tagging(row['id'], row['id'], 'Issue', row['id'] == 5 ? 6 : row['id']) }
+    convert(tag_tables(tags, taggings)) do |package|
+      refute package.importable?
+      assert_equal %w[invalid_name], blocking(package)
+      invalid = package.rows.fetch('anomalies').select { |row| row['code'] == 'invalid_name' }
+      assert_equal [[1], [2], [3]], invalid.map { |row| row['source_ids'] }
+      assert_equal ["no\u00a0break", "edge\u00a0"], package.rows.fetch('tags').last(2).map { |row| row['name'] }
+    end
+    %W[\u00a0 \u2003 \u205f \u3000 \u2028].each { |name| assert TP.name_problem(name), name.inspect }
+    assert_nil TP.name_problem("no\u00a0break")
+  end
+
+  def test_tag_permissions_of_the_source_roles
+    tables = tag_tables([tag(1, 'one', 1)], [tagging(1, 1, 'Issue', 1)])
+    tables['roles'] += [
+      ConverterFixture.role(6, 'Strange', 0, []).merge('permissions' => "--- !ruby/object:OpenStruct\ntable: {}\n"),
+      ConverterFixture.role(7, 'Mapped', 0, []).merge('permissions' => "---\nview_issue_tags: true\n"),
+      ConverterFixture.role(8, 'Empty', 0, []).merge('permissions' => nil),
+      ConverterFixture.role(9, 'Quoted', 0, []).merge('permissions' => "---\n- view_issue_tags\n- \":add_wiki_tags\"\n- :x\n")
+    ]
+    convert(tables) do |package, _summary, report|
+      assert package.importable?
+      roles = package.rows.fetch('roles').to_h { |row| [row['name'], row] }
+      assert_equal({ 'builtin' => 1, 'id' => 1, 'name' => 'Non member', 'ordinal' => 1, 'tag_permissions' => %w[view_issue_tags] },
+                   roles['Non member'])
+      assert_equal [], roles['Anonymous']['tag_permissions']
+      assert_equal TP::TAG_PERMISSIONS, roles['rqMngr']['tag_permissions']
+      assert_equal %w[view_issue_tags], roles['rqReader']['tag_permissions']
+      assert_equal [], roles['rqWriter']['tag_permissions']
+      # Never loaded as Ruby objects: a tagged or mapped value is unreadable, not guessed.
+      assert_nil roles['Strange']['tag_permissions']
+      assert_nil roles['Mapped']['tag_permissions']
+      assert_equal [], roles['Empty']['tag_permissions']
+      assert_equal %w[add_wiki_tags view_issue_tags], roles['Quoted']['tag_permissions']
+      unreadable = package.rows.fetch('anomalies').select { |row| row['code'] == 'unreadable_role_permissions' }
+      assert_equal [[6], [7]], unreadable.map { |row| row['source_ids'] }
+      assert_equal %w[roles roles], unreadable.map { |row| row['table'] }
+      assert_equal 9, package.content.dig('counts', 'source_roles')
+      assert_equal 4, package.content.dig('counts', 'roles_with_tag_permissions')
+      info = report['entries'].find { |entry| entry['code'] == 'tags_information' && entry['subject'] == 'package' }
+      assert_equal 4, info['detail']['roles_with_tag_permissions'], info.inspect
+    end
+    tables = tag_tables([tag(1, 'one', 1)], [tagging(1, 1, 'Issue', 1)])
+    tables.delete('roles')
+    convert(tables) do |package|
+      # Without roles the tags still import; nobody gets permissions from the package.
+      assert package.importable?
+      assert_empty package.rows.fetch('roles')
+      assert_equal({ 'unreadable_role_permissions' => 1 }, codes(package))
+    end
+  end
+
+  # R3 of the adversarial review: the targets are bound to the sibling
+  # history by source id, so swapped targets do not verify.
+  def test_verifier_binds_objects_to_the_history_by_source_id
+    tables = tag_tables([tag(1, 'one', 2)], [tagging(1, 1, 'Issue', 1), tagging(2, 1, 'WikiPage', 1)])
+    convert(tables) do |package, _summary, _report, _path, history, csys|
+      Dir.mktmpdir('cstags-swap') do |tmp|
+        content = package.content.reject { |key, _value| %w[profile files counts].include?(key) }
+        forge = lambda do |label|
+          rows = Marshal.load(Marshal.dump(package.rows))
+          [rows, File.join(tmp, "#{label}.cstags")]
+        end
+        check = lambda do |label, expected, &mutate|
+          rows, path = forge.call(label)
+          mutate.call(rows)
+          TP.write(path, content: content, rows: rows)
+          errors = TP::Verifier.new(path).verify(history: history, csys: csys).errors
+          assert(errors.any? { |error| error.include?(expected) }, "#{label}: #{errors.inspect}")
+        end
+        swap = lambda do |rows, first, second|
+          a, b = [first, second].map { |id| rows['objects'].find { |row| row['id'] == id } }
+          a['target'], b['target'] = b['target'], a['target']
+        end
+        check.call('issues', 'Issue:1 does not match the history') { |rows| swap.call(rows, 'Issue:1', 'Issue:2') }
+        check.call('wiki', 'WikiPage:1 does not match the history') { |rows| swap.call(rows, 'WikiPage:1', 'WikiPage:2') }
+        check.call('csid', 'Issue:2 does not match the history') do |rows|
+          rows['objects'].find { |row| row['id'] == 'Issue:2' }['target']['csid'] = 'ALP-0099'
+        end
+        check.call('duplicate', 'objects repeat a source type and id') do |rows|
+          rows['objects'].find { |row| row['id'] == 'Issue:2' }['source_id'] = 1
+        end
+        check.call('id', 'object Issue:2 has an id that is not its source type and id') do |rows|
+          rows['objects'].find { |row| row['id'] == 'Issue:2' }['source_id'] = 3
+        end
+        check.call('unsupported', 'object unsupported:1 is unsupported without the reason unsupported_type') do |rows|
+          rows['objects'] << { 'id' => 'unsupported:1', 'source_type' => 'Issue', 'source_id' => nil, 'source_order' => nil, 'target' => nil,
+                               'untargeted_reason' => 'not_in_source' }
+        end
+        # Without the history only the package itself is checked.
+        rows, path = forge.call('alone')
+        swap.call(rows, 'Issue:1', 'Issue:2')
+        TP.write(path, content: content, rows: rows)
+        assert TP::Verifier.new(path).verify.ok?
+      end
+    end
+  end
+
+  # R4 of the adversarial review: what the package says about its source,
+  # its settings and its dates is checked, not only digested.
+  def test_verifier_checks_descriptors_settings_and_dates
+    convert(tag_tables([tag(1, 'one', 1)], [tagging(1, 1, 'Issue', 1)])) do |package, _summary, _report, _path, history, csys|
+      Dir.mktmpdir('cstags-r4') do |tmp|
+        check = lambda do |label, expected, &mutate|
+          rows = Marshal.load(Marshal.dump(package.rows))
+          content = Marshal.load(Marshal.dump(package.content.reject { |key, _value| %w[profile files counts].include?(key) }))
+          mutate.call(rows, content)
+          path = File.join(tmp, "#{label}.cstags")
+          TP.write(path, content: content, rows: rows)
+          errors = TP::Verifier.new(path).verify(history: history, csys: csys).errors
+          assert(errors.any? { |error| error.include?(expected) }, "#{label}: #{errors.inspect}")
+        end
+        descriptor = ->(content, name) { content['source']['table_descriptors'].find { |entry| entry['name'] == name } }
+        check.call('columns', 'without the anomaly that says so') do |_rows, content|
+          columns = descriptor.call(content, 'additional_taggings')['columns']
+          columns.reject! { |column| column['name'] == 'context' }
+          columns << { 'name' => 'owner_extra', 'type' => 'integer', 'sql_type' => 'int', 'null' => true }
+        end
+        check.call('rows', 'additional_tags declares 2 rows') { |_rows, content| descriptor.call(content, 'additional_tags')['rows'] += 1 }
+        check.call('descriptor', 'table_descriptors does not describe exactly the present tables') do |_rows, content|
+          content['source']['table_descriptors'].pop
+        end
+        check.call('setting', 'setting tags_sidebar has a value outside its domain') do |_rows, content|
+          content['source']['settings']['tags_sidebar']['value'] = 'sideways'
+        end
+        check.call('switch', 'setting show_with_count has a value outside its domain') do |_rows, content|
+          content['source']['settings']['show_with_count']['value'] = 'yes'
+        end
+        check.call('calendar', 'a tag has a date that is not a valid timestamp') do |rows, _content|
+          rows['tags'].first['created_at'] = '2021-02-31T05:06:07.000000Z'
+        end
+        check.call('format', 'a tagging has a date that is not a valid timestamp') do |rows, _content|
+          rows['taggings'].first['created_at'] = '2021-03-04T05:06:07Z'
+        end
+        check.call('null', 'a tag has no creation or update time') { |rows, _content| rows['tags'].first['updated_at'] = nil }
+      end
+    end
+    # A source date the destination cannot hold is a blocking anomaly of the conversion.
+    bad = tag(1, 'one', 1).merge('created_at' => '2021-02-31T05:06:07.000000Z')
+    convert(tag_tables([bad, tag(2, 'two', 0).merge('updated_at' => nil)], [tagging(1, 1, 'Issue', 1).merge('created_at' => '2021-04-31T00:00:00.000000Z')])) do |package|
+      assert_equal %w[invalid_timestamp], blocking(package)
+      assert_equal [['taggings', 1], ['tags', 1], ['tags', 2]], package.rows.fetch('anomalies').select { |row| row['code'] == 'invalid_timestamp' }
+                                                                    .map { |row| [row['table'], row['source_ids'].first] }
+    end
+    assert_nil TP.timestamp_problem('2024-02-29T23:59:59.999999Z')
+    %w[2023-02-29T00:00:00.000000Z 2021-13-01T00:00:00.000000Z 2021-01-01T24:00:00.000000Z 2021-01-01 x].each do |value|
+      assert TP.timestamp_problem(value), value
+    end
+  end
+
+  def test_verifier_rejects_forged_roles
+    convert(tag_tables([tag(1, 'one', 1)], [tagging(1, 1, 'Issue', 1)])) do |package|
+      Dir.mktmpdir('cstags-roles') do |tmp|
+        content = package.content.reject { |key, _value| %w[profile files counts].include?(key) }
+        { 'unknown' => %w[view_issue_tags delete_everything], 'unsorted' => %w[view_issue_tags add_wiki_tags], 'text' => 'view_issue_tags' }
+          .each do |label, permissions|
+            rows = package.rows.transform_values { |list| list.map(&:dup) }
+            rows['roles'].first['tag_permissions'] = permissions
+            forged = File.join(tmp, "#{label}.cstags")
+            TP.write(forged, content: content, rows: rows)
+            errors = TP::Verifier.new(forged).verify.errors
+            assert(errors.any? { |error| error.include?('tag_permissions that are not a sorted list') }, "#{label}: #{errors.inspect}")
+          end
+        # The manifest counts the roles: a row removed after writing does not verify.
+        rows = package.rows.transform_values { |list| list.map(&:dup) }
+        forged = File.join(tmp, 'counted.cstags')
+        manifest = TP.write(forged, content: content, rows: rows)
+        assert_equal 3, manifest.dig('content', 'counts', 'roles_with_tag_permissions')
+        Zip::OutputStream.open(File.join(tmp, 'dropped.cstags')) do |zip|
+          Zip::File.open(forged) do |archive|
+            archive.each do |entry|
+              data = entry.get_input_stream(&:read)
+              data = data.lines.drop(1).join if entry.name == 'tables/roles.jsonl'
+              zip.put_next_entry(entry.name)
+              zip.write(data)
+            end
+          end
+        end
+        assert_includes TP::Verifier.new(File.join(tmp, 'dropped.cstags')).verify.errors, 'tables/roles.jsonl has a different SHA-256'
+      end
     end
   end
 

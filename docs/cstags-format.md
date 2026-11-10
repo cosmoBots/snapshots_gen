@@ -18,6 +18,7 @@ This document is the contract between the converter and the tags importer. `conv
 - **Names are exact.** A name is the exact sequence of characters the source stored: no strip, no case change, no Unicode normalization, no transliteration, no truncation and no split at commas. `A,B` is one tag; `A` and `a` are two; `café` written with one code point and with two are two.
 - **Nothing is decided in silence.** Whatever the destination cannot hold exactly is an anomaly with a code. A blocking anomaly makes the package not importable. The converter does not repair, merge, rename or reassign anything.
 - **Identities are logical.** Objects are named by what the new instance can find: an item by its project and final CSID, a wiki page by its project and title. Source ids are only evidence.
+- **Who could see them.** Every source role is listed with the tag permissions it had, so the importer can give the same permissions to the roles the history import maps them to.
 
 ## The strict profile
 
@@ -47,6 +48,7 @@ manifest.json
 tables/tags.jsonl
 tables/taggings.jsonl
 tables/objects.jsonl
+tables/roles.jsonl
 reports/anomalies.jsonl
 ```
 
@@ -134,6 +136,7 @@ All of them are recomputed by the verifier from the rows and must match.
 | `distinct_contexts` | Distinct `context` values of the taggings, `null` included as a value of its own. A statistic: the rows keep each value. |
 | `non_null_taggers` | Taggings with `tagger_id` or `tagger_type` set. |
 | `duplicate_projection_groups` | Groups of taggings with the same `object_id` and the same exact tag name (or the same unknown `tag_id`). |
+| `source_roles`, `roles_with_tag_permissions` | Rows of `roles.jsonl`, and those whose `tag_permissions` is a non-empty list. |
 | `blocking_anomalies`, `warning_anomalies`, `information_anomalies` | Anomalies by severity. |
 
 ## Rows
@@ -187,14 +190,29 @@ Wiki page target: `{"project_identifier", "title", "type": "WikiPage"}` with the
 
 Two objects with the same target ignoring case (the way Redmine finds wiki pages and the history importer finds CSIDs) are reported: `ambiguous_object` (blocking) when one of them is tagged, `ambiguous_untagged_object` (warning) otherwise.
 
+### tables/roles.jsonl
+
+One line per row of the source `roles` table, in the legacy snapshot's order (by `id`), with or without tag permissions; empty when the snapshot has no `roles` table.
+
+| Key | Meaning |
+| --- | --- |
+| `ordinal` | Position of the row in the source table, from 1. |
+| `id`, `name` | The source id and name, as stored (`name` as `{"$base64": ...}` when it was not valid UTF-8). |
+| `builtin` | `0` for a role given to members, `1` for the built-in Non member role, `2` for Anonymous, as Redmine stores it; `null` when it is not an integer. |
+| `tag_permissions` | The tag permissions the role had, sorted: a subset of `add_wiki_tags`, `create_issue_tags`, `edit_issue_tags` and `view_issue_tags` (the same names in the old fork and in 4.6.0). `[]` when it had none, `null` when its permissions could not be read. |
+
+Redmine stores `roles.permissions` as a YAML list of symbols. The converter reads it as a YAML tree and never builds Ruby objects from it: only a plain list of plain or quoted scalars is accepted, with the leading `:` of a symbol removed. A tagged value (`!ruby/...`), a map or anything else is unreadable: `tag_permissions` is `null` and there is an `unreadable_role_permissions` warning. Only the four tag permissions are carried; the other permissions of the role are not part of this package.
+
+Example: `{"builtin":0,"id":4,"name":"Reader","ordinal":4,"tag_permissions":["view_issue_tags"]}`
+
 ### reports/anomalies.jsonl
 
 | Key | Meaning |
 | --- | --- |
 | `id` | 1, 2, ... in file order. |
 | `code`, `severity` | The code and its fixed severity (table below). |
-| `table` | `tags`, `taggings`, `objects` or `settings`. |
-| `source_ids` | The ids involved: tag or tagging ids (`"ordinal:<n>"` when the id is null), object ids, or setting keys. |
+| `table` | `tags`, `taggings`, `objects`, `roles`, `settings` or `history`. |
+| `source_ids` | The ids involved: tag, tagging or role ids (`"ordinal:<n>"` when the id is null), object ids, setting keys, or `journal_details` ids for `history`. |
 | `reason` | A generic sentence. It never holds a tag name or any content. |
 
 Sorted by `code`, `table` and `source_ids`. The codes of version 1:
@@ -205,7 +223,7 @@ Sorted by `code`, `table` and `source_ids`. The codes of version 1:
 | `missing_column` | blocking | An expected column is not in a table. |
 | `unknown_column` | blocking | A table has columns without an approved mapping (their values are in `source_extra`). |
 | `invalid_key` | blocking | A tag or tagging `id` is null or repeated. |
-| `invalid_name` | blocking | A name is null, empty, only spaces, has leading or trailing spaces (the destination model strips them), holds U+0000 (PostgreSQL cannot store it) or is longer than 255 characters. |
+| `invalid_name` | blocking | A name is null, empty, only spaces (any Unicode space, as `String#blank?` of ActiveSupport sees them: the tag list of 4.6.0 drops such a name), has leading or trailing spaces (the destination model strips them), holds U+0000 (PostgreSQL cannot store it) or is longer than 255 characters. |
 | `invalid_encoding` | blocking | A name is not valid UTF-8. |
 | `duplicate_name` | blocking | Two tags have exactly the same name. |
 | `orphan_tag` | blocking | A tagging's `tag_id` is null or names no unique tag. |
@@ -217,27 +235,31 @@ Sorted by `code`, `table` and `source_ids`. The codes of version 1:
 | `duplicate_projection` | blocking | Taggings that would collapse into one destination row. |
 | `ambiguous_object` | blocking | A tagged object shares its destination identity with another. |
 | `missing_settings` | blocking | `active_issue_tags` or `active_wiki_tags` cannot be determined. |
+| `history_tag_change_dropped` | blocking | A journal of an item absorbed into a document, or of an item that is not in the source, has tag changes (`attr`/`tag_list` details). The history package cannot keep that journal, so the change would be lost; it is a tag that may have no current tagging left, so nothing else would show it. One anomaly per journal, with its detail ids; the reason names the journal and the source item, never the tags. |
 | `ambiguous_untagged_object` | warning | An untagged object shares its destination identity with another. |
 | `invalid_setting` | warning | A display setting cannot be determined; the destination keeps its default. |
 | `tags_not_visible` | warning | A tagged object type is switched off. |
 | `unused_tag` | warning | A tag has no taggings. It is imported, but the 4.6.0 plugin deletes unused tags after any later edit of an item (`AdditionalTagsRemoveUnusedTagJob`). |
 | `case_variant_names` | warning | Names equal except for case. They stay apart, but the new tag API looks names up ignoring case. |
 | `scoped_tag_conflict` | warning | An object has two tags of the same `group::` scope, which 4.6.0 rejects when the object is edited. |
+| `comma_in_name` | warning | A name has a comma. It is imported as one tag, exactly, but the tag field of 4.6.0 is a comma separated list: the first ordinary edit of an object with this tag splits it into several tags. |
+| `unreadable_role_permissions` | warning | The `roles` table, its `permissions` column or the permissions of a role cannot be read. The tags import; no tag permission is given for those roles. |
+| `invalid_timestamp` | blocking | A tag date (`created_at`, `updated_at`) is missing, or a tag or tagging date is not a datetime of the format that exists in the calendar (no 31 February, no hour 24). The destination requires the tag dates, and no date is ever moved to another day. |
 | `counter_mismatch` | information | A stored `taggings_count` differs from the real count. |
 
 ## Verification
 
 `TagsPackage::Verifier#verify(history:, csys:)` accepts a package only when:
 
-1. the archive holds exactly the five entries, safely named, contiguous and within the size limit;
+1. the archive holds exactly the six entries, safely named, contiguous and within the size limit;
 2. `manifest.json` is canonical, has exactly its four keys, `schema` `cosmosys-tags` and `schema_version` `"1"`, and its `content_sha256` matches;
 3. `content` has exactly its keys, `profile` is the profile of version 1 and `importable` is a boolean;
 4. every file matches its SHA-256, size and line count, is UTF-8, and each line is a canonical object with exactly the keys of its file;
-5. ordinals run 1, 2, ...; objects are unique and sorted; every tagging names an object; every object has either a well-formed target or a known reason; anomalies have known codes with their severity and are sorted;
+5. ordinals run 1, 2, ... (tags, taggings and roles); every role's `builtin` is an integer or `null` and its `tag_permissions` `null` or a sorted list of distinct tag permissions; objects are unique and sorted, with one row per (`source_type`, `source_id`) and an `id` that is `<source_type>:<source_id>` or, only with the reason `unsupported_type`, `unsupported:<n>`; every tagging names an object; every object has either a well-formed target or a known reason; anomalies have known codes with their severity and are sorted;
 6. `counts` equal the counts of the rows and `importable` equals "no blocking anomaly";
-7. `source` has its keys, `settings` exactly the ten keys with well-formed entries;
-8. when `importable` is `true`, the strict profile holds row by row, recomputed rather than read from the anomalies: both tables present, critical settings `"0"` or `"1"`, unique ids, exact valid unique names, no `source_extra`, every tagging with a unique tag, context `tags`, no tagger, type `Issue` or `WikiPage`, an object with a target, no collapsing taggings and no shared target among tagged objects;
-9. when given, the `.cshistory` verifies and matches both digests, and the `.csys` files are exactly those of `csys_packages`.
+7. `source` has its keys, `settings` exactly the ten keys with well-formed entries whose values are in their domain (`"0"`/`"1"` for switches, the listed words for the others); `table_descriptors` describes exactly the present tables, each with as many `rows` as the package carries, and columns that differ from the known ones only together with their `missing_column` or `unknown_column` anomaly; an absent table has no rows;
+8. when `importable` is `true`, the strict profile holds row by row, recomputed rather than read from the anomalies: both tables present, critical settings `"0"` or `"1"`, unique ids, tag dates present and every date a valid timestamp, exact valid unique names, no `source_extra`, every tagging with a unique tag, context `tags`, no tagger, type `Issue` or `WikiPage`, an object with a target, no collapsing taggings and no shared target among tagged objects;
+9. when given, the `.cshistory` verifies and matches both digests, and every object with a target is bound to the history by its source id: the history has exactly one item (or wiki page) with that id, and the target says what that row says (an item's `item_key`, CSID and project identifier; a page's project identifier and exact title). A package whose targets were swapped or rewritten does not verify even with recomputed digests. The `.csys` files are exactly those of `csys_packages`.
 
 `TagsPackage.read(path, history:, csys:)` returns the manifest and rows only when all of this holds. `bin/verify-cstags PACKAGE [history=...] [csys=... ...]` exits 0 when the package verifies and is importable, 3 when it verifies but is not importable, and 1 when it does not verify.
 
@@ -247,17 +269,18 @@ Sorted by `code`, `table` and `source_ids`. The codes of version 1:
 
 - **The package.** It reads the package with `TagsPackage.read`, always giving it the `.cshistory` and every `.csys` found next to the `.cstags` (or in `packages=`), and refuses a package that does not verify, whose siblings are not exactly those of the conversion, or that is not importable.
 - **The destination.** Before writing it requires PostgreSQL with UTF-8, `additional_tags` 4.6 and `additionals` registered with every migration applied, and the two tables exactly as 4.6.0 leaves them: the same columns, types and `NOT NULL`, the unique indexes on `name` and on (`tag_id`, `taggable_id`, `taggable_type`) and no other, the foreign key of `tag_id`, and no trigger or check constraint. The collation of `name` must be deterministic, and all the names of the package must be distinct under it (asked to the database, not assumed).
-- **Identities.** Every object with a target, tagged or not, must be exactly one object: an issue by project and CSID ignoring case, a wiki page by project and identical title, never through a redirect. The `.cshistory` must have the same items (same `item_key`, project and CSID), and the items must already have the creation dates the history import restores; otherwise the history has not been imported and the tags import refuses.
+- **Identities.** Every object with a target, tagged or not, must be exactly one object: an issue by project and CSID ignoring case, a wiki page by project and identical title, never through a redirect. The `.cshistory` must have the same items (same source id, `item_key`, project and CSID), and the instance must hold the history of that very package: the items already have the creation dates the history import restores, and for every item of the package the tag changes of its history (`attr`/`tag_list` details: journal date, private flag, old and new value) are exactly those of the `.cshistory`, no more and no fewer. The history import keeps them literally and never drops them, so this is the materialized state of the history, read from the instance, not a record kept for the purpose: nothing is added to the schema. When no item has a creation date or a tag change to compare, the import cannot tell whether the history is there and refuses.
 - **What is already there.** A destination tag is reused only when its name is byte-equal and its dates are those of the package. The import refuses, without writing, when a tag has the same name and other dates, when a destination tag differs only in case from a tag of the package, when an object of the package has a tagging that is not in the package, or when a tagging exists with another date. Tags and taggings that are not of the package, on objects that are not of the package, are left alone.
 - **Writing.** One `REPEATABLE READ` transaction, with both tag tables locked. Rows are inserted through bare models over the two tables: no callbacks, no validations, no normalization, no `tag_list=`, no `find_or_create_all_with_like_by_name`, no lookup by `LOWER(name)`, and no issue or wiki page is saved. `created_at` (tags and taggings) and `updated_at` (tags) are those of the package. `taggings_count` of every tag of the package is set to the real count of all its taggings, not only the package's.
-- **Settings.** The `settings` values whose provenance is not `unavailable` are stored as the settings page stores them, and only when one differs from what the instance has; the others keep the destination value. A tagged type left switched off is reported (`tags_not_visible`), and so are the roles in use that lack `view_issue_tags`: the import never changes roles.
-- **Verification before the commit.** The tables are read again and compared: for every object of `objects.jsonl` with a target, also the untagged ones, the multiset of exact names (and their dates) with the package's; every tag of the package once in the catalog, with its dates, unused tags included; every counter with the real count; every tag and tagging that was there before, unchanged; and nothing else written: the content of every other table of the database is digested before and after, the rows written by the transaction are read from PostgreSQL's own statistics, and any job enqueued or mail sent counts as a failure. Any difference rolls everything back and is listed by ids and short SHA-256 of the names, never by name. After the commit the same comparison runs once more on a new connection.
-- **Twice.** `dry_run=yes` does everything and rolls back (sequences advance; nothing else stays). A second import finds everything there, writes no row and says so.
+- **Settings.** The `settings` values whose provenance is not `unavailable` are stored as the settings page stores them, and only when one differs from what the instance has; the others keep the destination value. A tagged type left switched off is reported (`tags_not_visible`).
+- **Roles.** Every destination role gets the tag permissions of `roles.jsonl` that its source roles had, and nothing else: a role given to members is mapped exactly as the history import maps memberships (`Importer.role_target`: a role with the same name, or the one of the default map or of `roles=old:new`, which must be the same in both steps), and the built-in Non member and Anonymous roles go to their built-in counterparts. Several source roles on one destination give the union. Permissions are only added, through `Role#add_permission!`, never removed; a source role with tag permissions and no destination role is a warning, not an error, and so are the roles in use that still lack `view_issue_tags`. The summary line `Roles:` and the import report list what was given and from which source roles.
+- **Verification before the commit.** The tables are read again and compared: for every object of `objects.jsonl` with a target, also the untagged ones, the multiset of exact names (and their dates) with the package's; every tag of the package once in the catalog, with its dates, unused tags included; every counter with the real count; every tag and tagging that was there before, unchanged; every role with the same columns, the roles that had to change with exactly their old permissions plus the planned ones, and the others with the same bytes; and nothing else written: the content of every other table of the database is digested before and after, the rows written by the transaction are read from PostgreSQL's own statistics, and any job enqueued or mail sent counts as a failure. Any difference rolls everything back and is listed by ids and short SHA-256 of the names, never by name. After the commit the same comparison runs once more on a new connection.
+- **Twice.** `dry_run=yes` does everything and rolls back (sequences advance; nothing else stays). A second import finds everything there, roles included, writes no row and says so.
 
 ## History
 
-Tag changes in the history are not part of this package. The old plugin recorded them as journal details `property` `attr`, `prop_key` `tag_list`, with the old and new lists printed as text. The `.cshistory` carries them as literal attributes, exactly as stored (`null`, commas and quotes included), without parsing or rewriting them; the history package format does not change. The new plugin labels `tag_list` in English and Spanish and hides these details from users without `view_issue_tags`.
+Tag changes in the history are not part of this package, except as evidence of the ones the history cannot keep (`history_tag_change_dropped`). The old plugin recorded them as journal details `property` `attr`, `prop_key` `tag_list`, with the old and new lists printed as text. The `.cshistory` carries them as literal attributes, exactly as stored (`null`, commas and quotes included), without parsing or rewriting them; the history package format does not change. The new plugin labels `tag_list` in English and Spanish and hides these details from users without `view_issue_tags`.
 
 ## Versioning
 
-Version 1 readers accept only `schema` `cosmosys-tags` and `schema_version` `"1"`. Any change to identity, names, context, tagger, order, the profile or the meaning of a row needs a new version, and so does any new exception to the strict profile. The version 1 verifier also rejects keys, anomaly codes and counts it does not know, so adding any of them needs a new version as well.
+Version 1 readers accept only `schema` `cosmosys-tags` and `schema_version` `"1"`. Version 1 was extended in place before any package was published: the code `comma_in_name`, `tables/roles.jsonl`, the counts `source_roles` and `roles_with_tag_permissions`, the code `unreadable_role_permissions`, the code `history_tag_change_dropped` with the anomaly table `history`, the code `invalid_timestamp` and the checks of descriptors, setting domains and timestamps are part of it. Any change to identity, names, context, tagger, order, the profile or the meaning of a row needs a new version, and so does any new exception to the strict profile. The version 1 verifier also rejects keys, anomaly codes and counts it does not know, so adding any of them needs a new version as well.

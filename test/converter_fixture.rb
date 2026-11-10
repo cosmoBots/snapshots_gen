@@ -64,6 +64,12 @@ module ConverterFixture
         { 'id' => 6, 'issue_id' => 6, 'identifier' => nil, 'chapter_order' => 4 },
         { 'id' => 7, 'issue_id' => 7, 'identifier' => 'ALP-0001', 'chapter_order' => 2 }
       ],
+      # Roles as Redmine stores them: permissions are a YAML list of symbols.
+      'roles' => [
+        role(1, 'Non member', 1, %w[view_issues view_issue_tags]), role(2, 'Anonymous', 2, %w[view_issues]),
+        role(3, 'rqMngr', 0, %w[view_issues add_issues view_issue_tags create_issue_tags edit_issue_tags add_wiki_tags]),
+        role(4, 'rqReader', 0, %w[view_issues view_issue_tags]), role(5, 'rqWriter', 0, %w[view_issues edit_issues])
+      ],
       'wikis' => [{ 'id' => 1, 'project_id' => 1, 'start_page' => 'Wiki' }, { 'id' => 2, 'project_id' => 3, 'start_page' => 'Wiki' }],
       'wiki_pages' => [
         { 'id' => 1, 'wiki_id' => 1, 'title' => 'Wiki', 'created_on' => TIME, 'protected' => false, 'parent_id' => nil },
@@ -71,6 +77,11 @@ module ConverterFixture
         { 'id' => 3, 'wiki_id' => 1, 'title' => 'Untagged_page', 'created_on' => TIME, 'protected' => false, 'parent_id' => nil }
       ]
     }
+  end
+
+  def role(id, name, builtin, permissions)
+    { 'id' => id, 'name' => name, 'position' => id, 'assignable' => builtin.zero?, 'builtin' => builtin,
+      'permissions' => "---\n#{permissions.map { |permission| "- :#{permission}\n" }.join}", 'issues_visibility' => 'default' }
   end
 
   def issue(id, project_id, tracker_id, subject)

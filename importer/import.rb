@@ -13,10 +13,12 @@
 #       After every .csys import and before anyone works in the instance:
 #       writes the history and restores authors, dates and memberships, then
 #       verifies it, all in one transaction.
-#   rails runner import.rb tags TAGS.cstags [dry_run=yes] [packages=DIRECTORY]
+#   rails runner import.rb tags TAGS.cstags [dry_run=yes] [packages=DIRECTORY] [roles=old:new,...]
 #       After the history: writes the tags of the instance straight into the
-#       tables of the tag plugin and applies its source settings, in one
-#       transaction that is verified before it commits. The .cshistory and
+#       tables of the tag plugin, applies its source settings and gives each
+#       role the tag permissions of its source roles (mapped as the history
+#       maps memberships, with the same roles=), in one transaction that is
+#       verified before it commits. The .cshistory and
 #       every .csys of the same conversion must be next to the .cstags (or in
 #       packages=DIRECTORY). It needs the converter/ directory of this
 #       repository next to importer/ (the package format lives there).
@@ -42,7 +44,7 @@ module SnapshotsGen
 
       unless %w[prepare csys history tags].include?(command)
         warn 'usage: import.rb prepare|history HISTORY.cshistory [options] | csys PACKAGE.csys [parent=IDENTIFIER] [confirm=yes] ' \
-             '| tags TAGS.cstags [dry_run=yes] [packages=DIRECTORY]'
+             '| tags TAGS.cstags [dry_run=yes] [packages=DIRECTORY] [roles=old:new,...]'
         exit 2
       end
 

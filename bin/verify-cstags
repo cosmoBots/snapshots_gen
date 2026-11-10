@@ -29,6 +29,7 @@ end
 content = result.manifest.fetch('content')
 counts = content.fetch('counts')
 puts "valid: #{counts['source_tags']} tags, #{counts['source_taggings']} taggings, #{counts['objects']} objects, " \
+     "#{counts['source_roles']} roles (#{counts['roles_with_tag_permissions']} with tag permissions), " \
      "#{counts['blocking_anomalies']} blocking, #{counts['warning_anomalies']} warning and " \
      "#{counts['information_anomalies']} information anomalies; importable: #{content['importable']}"
 puts 'dependencies: not checked (pass history= and csys= to check them)' unless options['history'] && csys

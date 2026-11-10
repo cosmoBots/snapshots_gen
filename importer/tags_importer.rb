@@ -23,6 +23,7 @@ module SnapshotsGen
       TAGS_TABLE = 'additional_tags'
       TAGGINGS_TABLE = 'additional_taggings'
       SETTING_NAME = 'plugin_additional_tags'
+      ROLES_TABLE = 'roles'
       # The profile of the package names the plugin generation it was checked
       # against; any other must be validated before trusting this importer.
       PLUGIN_VERSIONS = { 'additional_tags' => '4.6.', 'additionals' => nil }.freeze
@@ -35,7 +36,8 @@ module SnapshotsGen
       }.freeze
       UNIQUE_INDEXES = { TAGS_TABLE => [%w[name]], TAGGINGS_TABLE => [%w[tag_id taggable_id taggable_type]] }.freeze
       # Tables this import may write to; anything else written is a failure.
-      WRITABLE = [TAGS_TABLE, TAGGINGS_TABLE, 'settings'].freeze
+      # In roles it only adds tag permissions (role_differences).
+      WRITABLE = [TAGS_TABLE, TAGGINGS_TABLE, 'settings', ROLES_TABLE].freeze
       SIDE_EFFECTS = %w[enqueue.active_job enqueue_at.active_job enqueue_all.active_job perform_start.active_job
                         deliver.action_mailer process.action_mailer].freeze
       BATCH = 500
@@ -81,10 +83,12 @@ module SnapshotsGen
             # query, so the snapshot of the transaction already has the lock.
             connection.execute("LOCK TABLE #{TAGS_TABLE}, #{TAGGINGS_TABLE} IN SHARE ROW EXCLUSIVE MODE")
             @before = state
+            @roles_before = role_state
             @others_before = fingerprint
             resolve_objects!
             check_history!
             plan!
+            plan_roles!
             say "Preflight passed: #{@managed.length} objects found (#{count_type('Issue')} items, #{count_type('WikiPage')} wiki pages), " \
                 "#{@tags.length - @new_tags.length} of #{@tags.length} tags and #{@taggings.length - @new_taggings.length} of " \
                 "#{@taggings.length} taggings already there, no conflicts."
@@ -172,11 +176,12 @@ module SnapshotsGen
         raise Error, error.message
       end
 
+      # Strict: an impossible date is refused, never normalized to another day.
       def timestamp(value, label, required)
         return nil if value.nil? && !required
 
-        Time.iso8601(value)
-      rescue ArgumentError, TypeError
+        TagsPackage.parse_time(value)
+      rescue TagsPackage::Error
         raise Error, "#{label} is not a timestamp the destination can hold"
       end
 
@@ -207,6 +212,7 @@ module SnapshotsGen
         @expected = Hash.new { |hash, key| hash[key] = [] }
         @taggings.each { |tagging| @expected[tagging.object_key] << tagging }
         @settings = @package.content.dig('source', 'settings')
+        @source_roles = rows.fetch('roles')
       end
 
       # --- destination: plugin, migrations, schema and collation ---------------
@@ -337,12 +343,23 @@ module SnapshotsGen
         )
       end
 
+      # Every role: the digest of all its columns but permissions, the raw
+      # permissions and the permissions as Redmine reads them.
+      def role_state
+        raw = connection.select_rows(<<~SQL.squish)
+          SELECT r.id, md5((to_jsonb(r) - 'permissions')::text), r.permissions FROM #{ROLES_TABLE} r ORDER BY r.id
+        SQL
+        permissions = Role.unscoped.pluck(:id, :permissions).to_h { |id, list| [id, Array(list).map(&:to_s)] }
+        raw.to_h { |id, others, text| [id.to_i, [others, text, permissions[id.to_i]]] }
+      end
+
       # Row count and content digest of every other table of the database (and
       # of every other setting). The transaction is REPEATABLE READ, so it only
       # sees its own writes: any difference between two fingerprints was made
-      # by this import.
+      # by this import. Roles are compared apart, column by column
+      # (role_differences).
       def fingerprint
-        (connection.tables - [TAGS_TABLE, TAGGINGS_TABLE]).sort.to_h do |table|
+        (connection.tables - [TAGS_TABLE, TAGGINGS_TABLE, ROLES_TABLE]).sort.to_h do |table|
           where = table == 'settings' ? " WHERE name <> #{connection.quote(SETTING_NAME)}" : ''
           row = connection.select_rows(<<~SQL.squish).first
             SELECT COUNT(*), md5(COALESCE(string_agg(h, '' ORDER BY h), ''))
@@ -437,8 +454,9 @@ module SnapshotsGen
       end
 
       # The sibling history package must describe the same items, and the
-      # history import must already have run: it is what gives every item its
-      # source creation date.
+      # history import must already have run, with this very package: every
+      # item has its source creation date, and the tag changes of the history
+      # in this instance are exactly those of the package (history_tag_changes).
       def check_history!
         problems = []
         pending = 0
@@ -446,13 +464,15 @@ module SnapshotsGen
         Package.open(@history_path) do |history|
           identifiers = history.by_id('projects').transform_values { |row| row['identifier'] }
           items = history.rows('items').to_h { |row| [row['key'], row] }
+          @history_tag_changes = expected_tag_changes(history)
           created = Issue.unscoped.where(id: @managed.keys.select { |key| key.first == 'Issue' }.map(&:last)).pluck(:id, :created_on).to_h
           @objects.each do |object_id, row|
             target = row.fetch('target')
             next unless target['type'] == 'Issue'
 
             item = items[target['item_key']]
-            unless item && item['csid'] == target['csid'] && identifiers[item['project_id']] == target['project_identifier']
+            unless item && item['id'] == row['source_id'] && item['csid'] == target['csid'] &&
+                   identifiers[item['project_id']] == target['project_identifier']
               problems << "#{object_id}: the history package does not have this item with the same project and CSID"
               next
             end
@@ -463,10 +483,58 @@ module SnapshotsGen
           end
         end
         fail_with('the tags package and the history package do not describe the same items', problems)
-        return if pending.zero?
+        if pending.positive?
+          raise Error, "the history is not imported yet: #{pending} of #{checked} items do not have their source creation date " \
+                       '(import the history first, step 6.3)'
+        end
+        if checked.zero? && @history_tag_changes.empty? && @objects.values.any? { |row| row.dig('target', 'type') == 'Issue' }
+          raise Error, 'the history is not imported yet, or cannot be told: no item of the package has a creation date or a tag change to compare'
+        end
 
-        raise Error, "the history is not imported yet: #{pending} of #{checked} items do not have their source creation date " \
-                     '(import the history first, step 6.3)'
+        fail_with('the history in this instance is not the one of this history package (tag changes differ); nothing was written',
+                  tag_change_differences)
+      end
+
+      # The tag changes (attr/tag_list details) of the package, by destination
+      # issue: [journal created_on, private, old value, new value]. The history
+      # import keeps them literally and never drops them, so after it the
+      # instance has exactly these.
+      def expected_tag_changes(history)
+        issue_of = @objects.values.select { |row| row.dig('target', 'type') == 'Issue' }
+                           .to_h { |row| [row.dig('target', 'item_key'), @destination[row['id']]&.last] }
+        journals = history.rows('journals').to_h { |row| [row['id'], row] }
+        expected = Hash.new { |hash, key| hash[key] = [] }
+        history.rows('journal_details').each do |detail|
+          next unless detail['property'] == 'attr' && detail['prop_key'] == 'tag_list'
+
+          journal = journals[detail['journal_id']]
+          issue = journal && issue_of[journal['item_key']]
+          raise Error, "tag change #{detail['id']} of the history package is on an item that is not in the tags package" unless issue
+
+          expected[issue] << [journal['created_on'] && Time.iso8601(journal['created_on']), journal['private_notes'] == true,
+                              detail['old_value'], detail['value']]
+        end
+        expected
+      end
+
+      def tag_change_differences
+        issues = @managed.keys.select { |type, _id| type == 'Issue' }.map(&:last)
+        found = Hash.new { |hash, key| hash[key] = [] }
+        issues.each_slice(BATCH * 4) do |ids|
+          JournalDetail.joins(:journal).where(journals: { journalized_type: 'Issue', journalized_id: ids }, property: 'attr', prop_key: 'tag_list')
+                       .pluck('journals.journalized_id', 'journals.created_on', 'journals.private_notes', 'journal_details.old_value',
+                              'journal_details.value')
+                       .each { |issue, *change| found[issue] << [change[0], change[1] == true, change[2], change[3]] }
+        end
+        key = ->(change) { [change[0] ? change[0].to_f : -1.0, change[1] ? 1 : 0, change[2].to_s.b, change[2].nil? ? 0 : 1, change[3].to_s.b, change[3].nil? ? 0 : 1] }
+        (issues | @history_tag_changes.keys).filter_map do |issue|
+          here = found.fetch(issue, []).sort_by(&key)
+          wanted = @history_tag_changes.fetch(issue, []).sort_by(&key)
+          next if here.length == wanted.length && here.zip(wanted).all? { |a, b| a[0] == b[0] && a[1..] == b[1..] }
+
+          "Issue ##{issue}: #{here.length} tag changes in its history here, #{wanted.length} in the history package" \
+            "#{here.length == wanted.length ? ' (different dates or values)' : ''}"
+        end
       end
 
       # --- plan: what is already there, what is missing, what conflicts --------
@@ -517,6 +585,50 @@ module SnapshotsGen
         fail_with('conflicts with tags that already exist in this instance; nothing was written', problems)
       end
 
+      # Each destination role gets the tag permissions its source roles had
+      # (several source roles on one destination: the union). Roles are
+      # mapped as the history import maps memberships (Importer.role_target,
+      # with the same roles=old:new), and the built-in Non member and
+      # Anonymous roles to themselves. Permissions are only added, never
+      # removed.
+      def plan_roles!
+        overrides = @options.fetch('roles', {})
+        grants = {}
+        @roles_without_destination = []
+        @source_roles.each do |row|
+          permissions = row['tag_permissions']
+          next if permissions.nil? || permissions.empty?
+
+          role = destination_role(row, overrides)
+          unless role
+            @roles_without_destination << "#{source_role_label(row)} (#{permissions.join(', ')})"
+            next
+          end
+          grant = (grants[role.id] ||= { role: role, permissions: [], sources: [] })
+          grant[:permissions] |= permissions
+          grant[:sources] << source_role_label(row)
+        end
+        @role_grants = grants.values.sort_by { |grant| grant[:role].id }
+        @role_changes = @role_grants.filter_map do |grant|
+          missing = grant[:permissions].sort - Array(grant[:role].permissions).map(&:to_s)
+          [grant[:role], missing, grant[:sources]] if missing.any?
+        end
+      end
+
+      def destination_role(row, overrides)
+        if row['builtin'] == 0
+          row['name'].is_a?(String) ? Importer.role_target(row['name'], overrides) : nil
+        elsif TagsPackage::BUILTIN_ROLES.key?(row['builtin'])
+          found = Role.unscoped.where(builtin: row['builtin']).to_a
+          found.length == 1 ? found.first : nil
+        end
+      end
+
+      def source_role_label(row)
+        name = row['name'].is_a?(String) ? row['name'] : "##{row['id']}"
+        TagsPackage::BUILTIN_ROLES.key?(row['builtin']) ? "#{name} (built-in)" : name
+      end
+
       # --- writing ---------------------------------------------------------------
 
       def write!
@@ -553,6 +665,7 @@ module SnapshotsGen
           SQL
         end
         apply_settings!
+        apply_roles!
         say "Tags: #{@new_tags.length} created, #{@tags.length - @new_tags.length} already there" \
             "#{@foreign_tags.positive? ? " (#{@foreign_tags} other tags of this instance left as they are)" : ''}. " \
             "Taggings: #{@new_taggings.length} created, #{@taggings.length - @new_taggings.length} already there. " \
@@ -578,7 +691,48 @@ module SnapshotsGen
             "#{kept.any? ? "; not in the source, left as they are: #{kept.join(', ')}" : ''}."
       end
 
+      def apply_roles!
+        @role_changes.each do |role, missing, _sources|
+          role.add_permission!(*missing.map(&:to_sym))
+        rescue ActiveRecord::RecordInvalid => error
+          raise Error, "the role #{role.name} could not be saved with its tag permissions " \
+                       "(#{error.record.errors.full_messages.join('; ')}); nothing was written"
+        end
+        line = if @role_changes.any?
+                 @role_changes.map { |role, missing, sources| "#{role.name} +#{missing.join(' +')} (from #{sources.join(', ')})" }.join('; ')
+               elsif @role_grants.any?
+                 "#{@role_grants.map { |grant| grant[:role].name }.join(', ')} already have the tag permissions of their source roles"
+               else
+                 'no source role had tag permissions'
+               end
+        say "Roles: #{line}."
+      end
+
       # --- verification ----------------------------------------------------------
+
+      # Roles may only have gained the planned tag permissions: every other
+      # column is the same, the permissions of the other roles are the same
+      # bytes, and the changed ones are the old list plus what was planned.
+      def role_differences(now)
+        problems = []
+        added = @role_changes.to_h { |role, missing, _sources| [role.id, missing] }
+        (@roles_before.keys | now.keys).sort.each do |id|
+          was = @roles_before[id]
+          is = now[id]
+          unless was && is
+            problems << "role ##{id} #{was ? 'is gone' : 'was created'}"
+            next
+          end
+          problems << "role ##{id} changed outside its permissions" unless was[0] == is[0]
+          if added.key?(id)
+            expected = was[2] + added[id]
+            problems << "role ##{id} has permissions #{is[2].sort.inspect}, expected #{expected.sort.inspect}" unless is[2] == expected
+          elsif was[1] != is[1]
+            problems << "role ##{id} changed its permissions and nothing had to change"
+          end
+        end
+        problems
+      end
 
       # Compares what the database holds now with the package and with what
       # was there before; returns the differences.
@@ -649,7 +803,7 @@ module SnapshotsGen
 
       def verify!
         now = state
-        problems = differences(now)
+        problems = differences(now) + role_differences(role_state)
         Setting.clear_cache
         @wanted_settings.each do |key, value|
           problems << "setting #{key} is #{current_setting(key).inspect}, the source has #{value.inspect}" unless current_setting(key) == value
@@ -673,9 +827,11 @@ module SnapshotsGen
         (@writes.keys - WRITABLE).each { |table| problems << "the import wrote to #{table} (#{@writes[table].join('/')} rows inserted/updated/deleted)" }
         # PostgreSQL counts nothing when track_counts is off: then the content
         # digests above are the only evidence, and the summary says so.
-        @write_statistics = (@new_tags.empty? || @writes.key?(TAGS_TABLE)) && (@new_taggings.empty? || @writes.key?(TAGGINGS_TABLE))
+        @write_statistics = (@new_tags.empty? || @writes.key?(TAGS_TABLE)) && (@new_taggings.empty? || @writes.key?(TAGGINGS_TABLE)) &&
+                            (@role_changes.empty? || @writes.key?(ROLES_TABLE))
         if @write_statistics
-          { TAGS_TABLE => [@new_tags.length, @counters_set, 0], TAGGINGS_TABLE => [@new_taggings.length, 0, 0] }.each do |table, expected|
+          { TAGS_TABLE => [@new_tags.length, @counters_set, 0], TAGGINGS_TABLE => [@new_taggings.length, 0, 0],
+            ROLES_TABLE => [0, @role_changes.length, 0] }.each do |table, expected|
             written = @writes.fetch(table, [0, 0, 0])
             problems << "the import wrote #{written.join('/')} rows to #{table} (inserted/updated/deleted), expected #{expected.join('/')}" unless written == expected
           end
@@ -705,9 +861,10 @@ module SnapshotsGen
         Setting.clear_cache
         problems = if dry_run?
                      now = state
-                     %i[tags taggings setting].filter_map { |part| "#{part} are not as before the dry run" unless now[part] == @before[part] }
+                     %i[tags taggings setting].filter_map { |part| "#{part} are not as before the dry run" unless now[part] == @before[part] } +
+                       (role_state == @roles_before ? [] : ['roles are not as before the dry run'])
                    else
-                     differences(state) + @wanted_settings.filter_map do |key, value|
+                     differences(state) + role_differences(role_state) + @wanted_settings.filter_map do |key, value|
                        "setting #{key} is #{current_setting(key).inspect}" unless current_setting(key) == value
                      end
                    end
@@ -715,7 +872,7 @@ module SnapshotsGen
         title = dry_run? ? 'the dry run left changes behind' : 'THE IMPORT WAS COMMITTED but reading it back shows differences'
         fail_with(title, problems)
 
-        @unchanged = @new_tags.empty? && @new_taggings.empty? && @counters_set.zero? && @setting_changes.empty?
+        @unchanged = @new_tags.empty? && @new_taggings.empty? && @counters_set.zero? && @setting_changes.empty? && @role_changes.empty?
         if dry_run?
           say 'Dry run: everything was rolled back.'
         elsif @unchanged
@@ -727,8 +884,12 @@ module SnapshotsGen
       end
 
       # Tags are only seen by roles with view_issue_tags, in projects with the
-      # module; the import does not change roles.
+      # module; the import gives it only to roles whose source roles had it.
       def visibility_notes
+        if @roles_without_destination.any?
+          say "WARNING: source roles with tag permissions and no destination role (nothing given for them; map them with " \
+              "roles=old:new as in the history import): #{@roles_without_destination.join(', ')}."
+        end
         { 'Issue' => 'active_issue_tags', 'WikiPage' => 'active_wiki_tags' }.each do |type, key|
           tagged = @taggings.count { |tagging| @destination.fetch(tagging.object_key).first == type }
           # In a dry run the settings are rolled back: what counts is what the import leaves.
@@ -743,11 +904,14 @@ module SnapshotsGen
         without_module = project_ids - EnabledModule.where(project_id: project_ids, name: 'issue_tracking').pluck(:project_id)
         say "WARNING: #{without_module.length} projects with tagged items do not have the issue tracking module." if without_module.any?
         role_ids = MemberRole.joins(:member).where(members: { project_id: project_ids }).distinct.pluck(:role_id)
-        blind = Role.where(id: role_ids).reject { |role| role.permissions.include?(:view_issue_tags) }.map(&:name).sort
+        # In a dry run the roles are rolled back: what counts is what the import leaves.
+        granted = @role_changes.select { |_role, missing, _sources| missing.include?('view_issue_tags') }.map { |role, *_rest| role.id }
+        blind = Role.where(id: role_ids).reject { |role| role.permissions.include?(:view_issue_tags) || granted.include?(role.id) }
+                    .map(&:name).sort
         return if blind.empty?
 
-        say "WARNING: roles used in the projects with tags that lack the view_issue_tags permission (their members see neither the " \
-            "tags nor the tag changes of the history): #{blind.join(', ')}."
+        say "WARNING: roles used in the projects with tags that lack the view_issue_tags permission, also after the import because " \
+            "their source roles did not have it (their members see neither the tags nor the tag changes of the history): #{blind.join(', ')}."
       end
 
       def write_report!
@@ -758,7 +922,9 @@ module SnapshotsGen
           'stats' => { 'objects' => @managed.length, 'tags_created' => @new_tags.length, 'tags_already_there' => @tags.length - @new_tags.length,
                        'taggings_created' => @new_taggings.length, 'taggings_already_there' => @taggings.length - @new_taggings.length,
                        'counters_corrected' => @counters_set, 'other_tags_in_instance' => @foreign_tags,
-                       'settings_changed' => @setting_changes.map { |key, old, new| { 'key' => key, 'from' => old, 'to' => new } } },
+                       'settings_changed' => @setting_changes.map { |key, old, new| { 'key' => key, 'from' => old, 'to' => new } },
+                       'roles_changed' => @role_changes.map { |role, missing, sources| { 'role' => role.name, 'added' => missing, 'from' => sources } },
+                       'roles_without_destination' => @roles_without_destination },
           'rows_written' => @writes, 'log' => @log
         }
         File.write(report, JSON.pretty_generate(summary) + "\n")

@@ -3,7 +3,8 @@
 # (PostgreSQL, with the "tags" option of the deploy): converts the synthetic
 # snapshot of test/importer_tags_fixture.rb, imports it as the procedure does
 # and compares what PostgreSQL holds, byte by byte, with what the fixture
-# expects. It also checks the dry run, the second import and the refusals.
+# expects. It also checks the dry run, the second import, the refusals and
+# the tag permissions given to the roles.
 #
 #   test/importer_tags_e2e.sh
 #
@@ -77,10 +78,16 @@ expect_refusal() {
   fi
 }
 psql() { docker exec -i "$database" psql -U "${POSTGRES_USER:-redmine}" -d "${POSTGRES_DB:-redmine}" -X -A -t -q "$@"; }
-# Every row of the tag tables and of the plugin setting, as stored.
+# Every row of the tag tables, of the plugin setting and of the roles, as stored.
 raw_state() {
   psql -c "COPY (SELECT * FROM additional_tags ORDER BY id) TO STDOUT" -c "COPY (SELECT * FROM additional_taggings ORDER BY id) TO STDOUT" \
-    -c "COPY (SELECT id, value, updated_on FROM settings WHERE name = 'plugin_additional_tags') TO STDOUT"
+    -c "COPY (SELECT id, value, updated_on FROM settings WHERE name = 'plugin_additional_tags') TO STDOUT" \
+    -c "COPY (SELECT * FROM roles ORDER BY id) TO STDOUT"
+}
+# The tag permissions of a destination role, one per line, sorted.
+tag_permissions() {
+  psql -c "SELECT permissions FROM roles WHERE name = '$1'" | tr -d ' -' | grep -E '^:(view_issue_tags|create_issue_tags|edit_issue_tags|add_wiki_tags)$' \
+    | tr -d ':' | LC_ALL=C sort | paste -sd, - || true
 }
 # The destination in the shape of expected.tsv: names as hexadecimal bytes.
 logical_state() {
@@ -120,6 +127,8 @@ for package in "$out"/converted/*.csys; do
   runner "csys-$(basename "$package" .csys)" csys "/tmp/sg/pkg/$(basename "$package")" confirm=yes
 done
 raw_state >"$out/state-empty.txt"
+psql -c "COPY (SELECT id, permissions FROM roles ORDER BY id) TO STDOUT" >"$out/roles-before.txt"
+manager_before="$(tag_permissions Manager)"
 
 step "tags before the history: refused"
 expect_refusal tags-before-history 'the history is not imported yet' tags "$tags"
@@ -137,13 +146,45 @@ step "tags, dry run"
 runner tags-dry tags "$tags" dry_run=yes || fail "the dry run failed"
 grep -q 'Dry run: everything was rolled back.' "$out/tags-dry.log" || fail "the dry run did not say it rolled back"
 raw_state >"$out/state-dry.txt"
-same "$out/state-empty.txt" "$out/state-dry.txt" "the dry run left the tag tables and the setting as they were"
+same "$out/state-empty.txt" "$out/state-dry.txt" "the dry run left the tag tables, the setting and the roles as they were"
+grep -q 'Developer +edit_issue_tags +view_issue_tags (from rqWriter)' "$out/tags-dry.log" && pass "the dry run plans the tag permissions of Developer" \
+  || fail "the dry run does not plan the tag permissions of Developer"
+grep -q 'warning comma_in_name (1)' "$out/tags-dry.log" && pass "the import shows the warning of the name with a comma" \
+  || fail "the import does not show the warning of the name with a comma"
+
+step "tags, dry run with roles=Ghost:Reporter"
+runner tags-dry-roles tags "$tags" dry_run=yes roles=Ghost:Reporter || fail "the dry run with roles= failed"
+grep -q 'Reporter +view_issue_tags (from Ghost)' "$out/tags-dry-roles.log" && pass "roles= maps a source role as in the history import" \
+  || fail "roles= does not map the source role"
+raw_state >"$out/state-dry-roles.txt"
+same "$out/state-empty.txt" "$out/state-dry-roles.txt" "the second dry run left everything as it was"
 
 step "tags"
 runner tags-import tags "$tags" || fail "the import failed"
 grep -q '^Tags imported.$' "$out/tags-import.log" || fail "the import did not say it imported"
 grep -q 'lack the view_issue_tags permission.*: Reporter\.$' "$out/tags-import.log" || fail "the import did not warn about the role without view_issue_tags"
 grep -q 'additional_tags 14/0/0' "$out/tags-import.log" || fail "the import did not write exactly 14 tags"
+grep -q 'roles 0/2/0' "$out/tags-import.log" && pass "the import updated two roles (Developer and Non member) and nothing else in roles" \
+  || fail "the rows written to roles are not two updates"
+grep -q 'no destination role.*: Ghost (view_issue_tags)\.$' "$out/tags-import.log" && pass "the source role without destination is a warning" \
+  || fail "the source role without destination is not reported"
+[ "$(tag_permissions Developer)" = edit_issue_tags,view_issue_tags ] && pass "Developer has the tag permissions of rqWriter" \
+  || fail "Developer has $(tag_permissions Developer)"
+[ -z "$(tag_permissions Reporter)" ] && pass "Reporter got no tag permission (rqReader had none)" || fail "Reporter has $(tag_permissions Reporter)"
+[ "$(tag_permissions 'Non member')" = view_issue_tags ] && pass "Non member has view_issue_tags, as in the source" \
+  || fail "Non member has $(tag_permissions 'Non member')"
+[ -z "$(tag_permissions Anonymous)" ] && pass "Anonymous got no tag permission" || fail "Anonymous has $(tag_permissions Anonymous)"
+[ "$(tag_permissions Manager)" = "$manager_before" ] && pass "Manager keeps the tag permissions it had ($manager_before), none removed" \
+  || fail "Manager had $manager_before and has $(tag_permissions Manager)"
+psql -c "COPY (SELECT id, permissions FROM roles ORDER BY id) TO STDOUT" >"$out/roles-after.txt"
+# Every permission a role had is still there, in the same place.
+# (the import appends, so the old permissions are a prefix of the new ones)
+if awk -F'\t' 'NR == FNR { before[$1] = $2; next } !($1 in before) || index($2, before[$1]) != 1 { bad = 1 } END { exit bad }' \
+     "$out/roles-before.txt" "$out/roles-after.txt"; then
+  pass "no role lost or reordered a permission it had"
+else
+  fail "a role lost or reordered permissions it had"
+fi
 raw_state >"$out/state-first.txt"
 logical_state >"$out/actual.tsv"
 LC_ALL=C sort "$out/fixture/expected.tsv" >"$out/expected.tsv"
@@ -152,8 +193,51 @@ same "$out/expected.tsv" "$out/actual.tsv" "PostgreSQL holds exactly the tags, t
 step "tags, second time"
 runner tags-again tags "$tags" || fail "the second import failed"
 grep -q '^Nothing to import' "$out/tags-again.log" || fail "the second import did not say there was nothing to import"
+grep -q 'already have the tag permissions of their source roles' "$out/tags-again.log" || fail "the second import did not say the roles were done"
 raw_state >"$out/state-second.txt"
 same "$out/state-first.txt" "$out/state-second.txt" "the second import changed no row, date or counter"
+
+step "a tag change of the history that is not the one of the package: refused"
+# The history in the instance must be the one of this .cshistory (R2 of the
+# adversarial review): one tag change altered, then one removed.
+psql -c "UPDATE journal_details SET value = value || ' (edited)' WHERE id = (SELECT MIN(id) FROM journal_details WHERE property = 'attr' AND prop_key = 'tag_list' AND value <> '')"
+raw_state >"$out/state-history-edited.txt"
+expect_refusal tags-history-edited 'is not the one of this history package' tags "$tags"
+psql -c "UPDATE journal_details SET value = left(value, length(value) - length(' (edited)')) WHERE property = 'attr' AND prop_key = 'tag_list' AND value LIKE '% (edited)'"
+psql -c "CREATE TABLE sg_e2e_detail AS SELECT * FROM journal_details WHERE id = (SELECT MAX(id) FROM journal_details WHERE property = 'attr' AND prop_key = 'tag_list')" \
+  -c "DELETE FROM journal_details WHERE id IN (SELECT id FROM sg_e2e_detail)"
+expect_refusal tags-history-missing 'tag changes in its history here' tags "$tags"
+psql -c "INSERT INTO journal_details SELECT * FROM sg_e2e_detail" -c "DROP TABLE sg_e2e_detail"
+raw_state >"$out/state-history-after.txt"
+same "$out/state-history-edited.txt" "$out/state-history-after.txt" "the refusals wrote nothing"
+logical_state >"$out/actual-history.tsv"
+same "$out/expected.tsv" "$out/actual-history.tsv" "the history is as the package says again"
+runner tags-history-restored tags "$tags" || fail "the import with the history restored failed"
+grep -q '^Nothing to import' "$out/tags-history-restored.log" || fail "with the history restored the import did not find everything there"
+
+step "a tag permission removed by hand from a role: given again, and only that"
+psql -c "UPDATE roles SET permissions = replace(permissions, E'- :view_issue_tags\n', '') WHERE name = 'Developer'"
+runner tags-roles-repair tags "$tags" || fail "the import that repairs the role failed"
+grep -q 'Roles: Developer +view_issue_tags (from rqWriter)\.$' "$out/tags-roles-repair.log" && pass "only the missing permission was given again" \
+  || fail "the repair of the role did not give exactly the missing permission"
+[ "$(tag_permissions Developer)" = edit_issue_tags,view_issue_tags ] || fail "Developer has $(tag_permissions Developer) after the repair"
+raw_state >"$out/state-first.txt"
+
+step "a write to a role outside its tag permissions: verification fails and everything is rolled back"
+psql -c "UPDATE roles SET permissions = replace(permissions, E'- :view_issue_tags\n', '') WHERE name = 'Developer'" \
+  -c "CREATE FUNCTION sg_e2e_role() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN NEW.assignable := NOT NEW.assignable; RETURN NEW; END'" \
+  -c "CREATE TRIGGER sg_e2e_role BEFORE UPDATE ON roles FOR EACH ROW EXECUTE FUNCTION sg_e2e_role()"
+raw_state >"$out/state-role-side-effect.txt"
+expect_refusal tags-role-side-effect 'verification failed, nothing was written' tags "$tags"
+grep -q 'changed outside its permissions' "$out/tags-role-side-effect.log" && pass "the verification names the role that changed outside its permissions" \
+  || fail "the verification did not see the change outside the permissions"
+raw_state >"$out/state-role-side-effect-after.txt"
+same "$out/state-role-side-effect.txt" "$out/state-role-side-effect-after.txt" "the failed verification left the roles as they were"
+psql -c "DROP TRIGGER sg_e2e_role ON roles" -c "DROP FUNCTION sg_e2e_role()"
+runner tags-role-restore tags "$tags" || fail "the import after removing the role trigger failed"
+[ "$(tag_permissions Developer)" = edit_issue_tags,view_issue_tags ] || fail "Developer has $(tag_permissions Developer) after the restore"
+raw_state >"$out/state-role-restored.txt"
+same "$out/state-first.txt" "$out/state-role-restored.txt" "without the trigger the role gets its permission back and nothing else differs"
 
 step "a tag that differs only in case from one of the package: refused"
 psql -c "INSERT INTO additional_tags (name, taggings_count, created_at, updated_at) VALUES ('Lonely Tag', 0, now(), now())"
