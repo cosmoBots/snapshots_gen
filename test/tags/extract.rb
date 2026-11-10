@@ -35,6 +35,38 @@ module TagsEvidence
   end
 
   class Extractor
+    # Redmine's settings page stores plugin settings as a
+    # HashWithIndifferentAccess, so the YAML root carries that Ruby tag. The
+    # tree is checked before anything is built: only that tag on the root, and
+    # no other tag, anchor or alias anywhere. Then it is loaded as plain data.
+    INDIFFERENT_HASH_TAG = '!ruby/hash:ActiveSupport::HashWithIndifferentAccess'
+
+    def self.plain_settings(text)
+      stream = Psych.parse_stream(text)
+      raise 'plugin settings must be exactly one YAML document' unless stream.children.length == 1
+
+      root = stream.children.first.root
+      raise 'plugin settings are not a YAML mapping' unless root.is_a?(Psych::Nodes::Mapping)
+      raise "plugin settings carry an unexpected YAML tag: #{root.tag}" unless root.tag.nil? || root.tag == INDIFFERENT_HASH_TAG
+      raise 'plugin settings use a YAML anchor' if root.anchor
+
+      root.children.each { |node| check_plain_node(node) }
+      root.tag = nil
+      root.implicit = true
+      YAML.safe_load(stream.to_yaml, permitted_classes: [], aliases: false)
+    end
+
+    def self.check_plain_node(node)
+      raise 'plugin settings use a YAML alias' if node.is_a?(Psych::Nodes::Alias)
+      raise "plugin settings carry an unexpected YAML tag: #{node.tag}" if node.respond_to?(:tag) && node.tag
+      raise 'plugin settings use a YAML anchor' if node.respond_to?(:anchor) && node.anchor
+      raise 'plugin settings hold an unexpected YAML node' unless node.is_a?(Psych::Nodes::Scalar) ||
+                                                                  node.is_a?(Psych::Nodes::Sequence) ||
+                                                                  node.is_a?(Psych::Nodes::Mapping)
+
+      node.children.each { |child| check_plain_node(child) } unless node.is_a?(Psych::Nodes::Scalar)
+    end
+
     def initialize(connection, side)
       @db, @side = connection, side
       raise ArgumentError, 'side must be source or target' unless %w[source target].include?(side)
@@ -90,7 +122,7 @@ module TagsEvidence
       stored_rows = rows("SELECT value FROM settings WHERE name = 'plugin_additional_tags'")
       raise 'ambiguous plugin settings' if stored_rows.length > 1
 
-      stored = stored_rows.empty? ? {} : YAML.safe_load(stored_rows.first.fetch('value'), permitted_classes: [], aliases: false)
+      stored = stored_rows.empty? ? {} : self.class.plain_settings(stored_rows.first.fetch('value'))
       raise 'plugin settings are not a plain hash' unless stored.is_a?(Hash) && defaults.is_a?(Hash)
 
       effective = {}

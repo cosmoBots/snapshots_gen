@@ -126,9 +126,40 @@ class TagsExtractionTest < Minitest::Test
 
   def test_serialized_objects_are_rejected_in_settings
     @db.stored_settings = "--- !ruby/object:Object {}\n"
-    assert_raises(Psych::DisallowedClass) { capture }
+    error = assert_raises(RuntimeError) { capture }
+    assert_match(/unexpected YAML tag/, error.message)
     assert_equal 'ROLLBACK', @db.commands.last
     refute File.exist?(@path)
+  end
+
+  # What Redmine's settings page stores for a plugin, and what the importer
+  # writes back: a HashWithIndifferentAccess tagged on the YAML root.
+  def test_settings_saved_by_redmine_are_read_as_plain_data
+    @db.stored_settings = "--- !ruby/hash:ActiveSupport::HashWithIndifferentAccess\n" \
+                          "active_issue_tags: '1'\nactive_wiki_tags: '0'\ntags_sidebar: cloud\n"
+    capture
+    evidence = TagsEvidence::Document.new(@path)
+    assert_equal '1', evidence.meta.dig('settings', 'effective', 'active_issue_tags')
+    assert_equal '0', evidence.meta.dig('settings', 'effective', 'active_wiki_tags')
+    assert_equal 'cloud', evidence.meta.dig('settings', 'effective', 'tags_sidebar')
+    assert_equal 'stored', evidence.meta.dig('settings', 'provenance', 'active_issue_tags')
+  end
+
+  def test_settings_with_any_other_tag_anchor_or_alias_are_rejected
+    [
+      "--- !ruby/hash:Hash\nactive_issue_tags: '1'\n",
+      "--- !ruby/hash:ActiveSupport::HashWithIndifferentAccess\nactive_issue_tags: !ruby/object:Object {}\n",
+      "--- !ruby/hash:ActiveSupport::HashWithIndifferentAccess\nactive_issue_tags: !!str '1'\n",
+      "--- &root\nactive_issue_tags: '1'\n",
+      "---\nactive_issue_tags: &one '1'\nactive_wiki_tags: *one\n",
+      "--- '1'\n",
+      "---\nactive_issue_tags: '1'\n---\nactive_wiki_tags: '1'\n"
+    ].each do |stored|
+      @db = Database.new('MySQL')
+      @db.stored_settings = stored
+      assert_raises(RuntimeError, stored) { capture }
+      refute File.exist?(@path), stored
+    end
   end
 
   def run_entry_point(side)
