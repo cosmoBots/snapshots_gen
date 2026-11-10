@@ -55,15 +55,26 @@ module ImporterTagsFixture
   def tables
     tables = ConverterFixture.base_tables
     # Tags only show in projects with the issue tracking module, to roles with
-    # view_issue_tags: one member whose role gets it in the new instance
-    # (rqMngr becomes Manager) and one whose role does not (rqReader, Reporter).
+    # view_issue_tags. The import gives each destination role the tag
+    # permissions of its source roles: rqMngr (Manager, which already has
+    # more and keeps them) and rqWriter (Developer, which gets them) had
+    # view_issue_tags, rqReader (Reporter) did not; the built-in Non member
+    # role had it; Ghost had it and has no destination role.
     tables['enabled_modules'] = tables['projects'].flat_map { |project| %w[issue_tracking wiki].map { |name| [project['id'], name] } }
                                                   .each_with_index.map { |(project, name), index| { 'id' => index + 1, 'project_id' => project, 'name' => name } }
     tables['users'] << tables['users'].first.merge('id' => 2, 'login' => 'reader', 'firstname' => 'C', 'lastname' => 'D')
-    tables['roles'] = [{ 'id' => 3, 'name' => 'rqMngr', 'builtin' => 0, 'position' => 1 }, { 'id' => 4, 'name' => 'rqReader', 'builtin' => 0, 'position' => 2 }]
-    tables['members'] = [{ 'id' => 1, 'user_id' => 1, 'project_id' => 1, 'created_on' => TIME }, { 'id' => 2, 'user_id' => 2, 'project_id' => 1, 'created_on' => TIME }]
+    tables['users'] << tables['users'].first.merge('id' => 3, 'login' => 'writer', 'firstname' => 'E', 'lastname' => 'F')
+    tables['roles'] = [
+      ConverterFixture.role(1, 'Non member', 1, %w[view_issues view_issue_tags]), ConverterFixture.role(2, 'Anonymous', 2, %w[view_issues]),
+      ConverterFixture.role(3, 'rqMngr', 0, %w[view_issues add_issues view_issue_tags]),
+      ConverterFixture.role(4, 'rqReader', 0, %w[view_issues]),
+      ConverterFixture.role(5, 'rqWriter', 0, %w[view_issues edit_issues view_issue_tags edit_issue_tags]),
+      ConverterFixture.role(6, 'Ghost', 0, %w[view_issues view_issue_tags])
+    ]
+    tables['members'] = (1..3).map { |id| { 'id' => id, 'user_id' => id, 'project_id' => 1, 'created_on' => TIME } }
     tables['member_roles'] = [{ 'id' => 1, 'member_id' => 1, 'role_id' => 3, 'inherited_from' => nil },
-                              { 'id' => 2, 'member_id' => 2, 'role_id' => 4, 'inherited_from' => nil }]
+                              { 'id' => 2, 'member_id' => 2, 'role_id' => 4, 'inherited_from' => nil },
+                              { 'id' => 3, 'member_id' => 3, 'role_id' => 5, 'inherited_from' => nil }]
     tables['wiki_contents'] = tables['wiki_pages'].map do |page|
       { 'id' => page['id'], 'page_id' => page['id'], 'author_id' => 1, 'text' => "Page #{page['id']}", 'comments' => '',
         'updated_on' => TIME, 'version' => 1 }

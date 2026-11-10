@@ -7,7 +7,7 @@ Este procedimiento lleva una instancia antigua de cosmoSys (Redmine 4.2 con los 
 - **La instancia antigua no se toca.** Solo se lee, dentro de una transacción de solo lectura. No se instala nada, no se migra la base de datos y no se reinicia el contenedor. Lo único que se escribe es un directorio temporal dentro del contenedor, que se borra al terminar.
 - **La instancia nueva tiene que estar vacía y cerrada** hasta el final del paso 7. Nadie debe trabajar en ella antes de importar el historial: Redmine usa el orden de las notas en varias funciones, y un historial añadido después quedaría desordenado. El importador se niega si encuentra notas que no sean suyas.
 - **Lo que no se migra** lo dice el informe de conversión. Entre otras cosas: lo que el cosmoSys antiguo nunca guardó en el historial (los botones de borrar y zombi, mover y reordenar en el árbol, las importaciones ODS y git), las noticias, los foros y los repositorios.
-- **Las etiquetas se migran tal cual** (paso 6.4): las mismas etiquetas, con el mismo nombre exacto, en los mismos ítems y páginas de wiki, con sus fechas, y los cambios de etiquetas en el historial. Lo que no se conserva es el orden de las etiquetas de cada ítem (el plugin nuevo siempre las ordena por nombre), y el plugin nuevo borra por su cuenta las etiquetas que no usa ningún ítem en cuanto alguien edita un ítem, igual que hacía el antiguo.
+- **Las etiquetas se migran tal cual** (paso 6.4): las mismas etiquetas, con el mismo nombre exacto, en los mismos ítems y páginas de wiki, con sus fechas, y los cambios de etiquetas en el historial. Cada rol de la instancia nueva recibe los permisos de etiquetas que tenía su rol antiguo, para que quien las veía las siga viendo (solo se añaden permisos, nunca se quitan). Lo que no se conserva es el orden de las etiquetas de cada ítem (el plugin nuevo siempre las ordena por nombre), y el plugin nuevo borra por su cuenta las etiquetas que no usa ningún ítem en cuanto alguien edita un ítem, igual que hacía el antiguo.
 - **Los modelos PORIS se migran en parte.** Ya llegan sus ítems, su jerarquía, sus campos personalizados (como campos personalizados) y sus relaciones, con los cambios que cuenta "Qué cambia en la conversión". En una fase posterior sus campos pasarán a los datos propios del perfil `poris` del cosmoSys nuevo y sus proyectos tomarán ese perfil; hasta entonces se importan como proyectos de ítems o de requisitos.
 - **Las contraseñas se conservan**: Redmine 4.2 y 7 las guardan igual. **El 2FA se reinicia**: quien lo usaba tiene que volver a activarlo.
 
@@ -35,7 +35,7 @@ La conversión no reorganiza nada a mano, pero el modelo nuevo nombra algunas co
 | `rqReviewer` | `Developer` |
 | `rqReader` | `Reporter` |
 
-Para otro reparto, añade `roles=rqReviewer:Reporter,...` a `importar history` (paso 6.3). Un rol sin destino deja sin importar sus membresías, y el paso 6.1 lo avisa.
+Para otro reparto, añade `roles=rqReviewer:Reporter,...` a `importar history` (paso 6.3) y lo mismo a `importar tags` (paso 6.4), que usa el mismo reparto para los permisos de etiquetas. Un rol sin destino deja sin importar sus membresías, y el paso 6.1 lo avisa.
 
 **Campos de los ítems:**
 
@@ -228,17 +228,20 @@ Todo ocurre en una sola transacción: o queda todo importado y verificado, o no 
 importar tags /tmp/sg/pkg/<nombre>.cstags dry_run=yes
 ```
 
-Si termina en `Dry run: everything was rolled back.`, impórtalas de verdad:
+Si en el paso 6.3 usaste `roles=...`, añade lo mismo aquí. Si termina en `Dry run: everything was rolled back.`, impórtalas de verdad:
 
 ```sh
 importar tags /tmp/sg/pkg/<nombre>.cstags
 ```
 
-Tiene que terminar en `Tags imported.`. Antes de escribir nada comprueba que los plugins de etiquetas están instalados y migrados, que sus tablas son las que conoce, que cada ítem y cada página de wiki del paquete existe una sola vez en la instancia nueva y que no hay ya etiquetas que choquen con las del paquete. Después escribe las etiquetas directamente en las tablas del plugin, sin pasar por los ítems (no crea notas en el historial, no cambia la fecha de ningún ítem y no manda correo), pone los ajustes del plugin como estaban en la instancia antigua (si las etiquetas estaban activadas, las activa) y, antes de confirmar, vuelve a leer la base y comprueba que cada ítem y cada página tiene exactamente las etiquetas del paquete, también los que no tenían ninguna, y que nada más ha cambiado. Todo ocurre en una sola transacción: o queda todo, o no queda nada.
+Tiene que terminar en `Tags imported.`. Antes de escribir nada comprueba que los plugins de etiquetas están instalados y migrados, que sus tablas son las que conoce, que cada ítem y cada página de wiki del paquete existe una sola vez en la instancia nueva y que no hay ya etiquetas que choquen con las del paquete. Después escribe las etiquetas directamente en las tablas del plugin, sin pasar por los ítems (no crea notas en el historial, no cambia la fecha de ningún ítem y no manda correo), pone los ajustes del plugin como estaban en la instancia antigua (si las etiquetas estaban activadas, las activa), da a cada rol de la instancia nueva los permisos de etiquetas que tenía su rol antiguo (la línea `Roles:` dice cuáles; solo añade, nunca quita) y, antes de confirmar, vuelve a leer la base y comprueba que cada ítem y cada página tiene exactamente las etiquetas del paquete, también los que no tenían ninguna, y que nada más ha cambiado. Todo ocurre en una sola transacción: o queda todo, o no queda nada.
 
 Repetir la orden no cambia nada: la segunda vez dice `Nothing to import` y deja la base como estaba. Lee los avisos del final (`WARNING`):
 
-- `roles ... lack the view_issue_tags permission`: los miembros con esos roles no verán las etiquetas ni los cambios de etiquetas del historial. La instancia nueva solo da los permisos de etiquetas (`view_issue_tags`, `create_issue_tags`, `edit_issue_tags` y `add_wiki_tags`) al rol `Manager`; dáselos a los roles que los tenían en la instancia antigua (Administración, Roles y permisos).
+- `roles ... lack the view_issue_tags permission, also after the import`: los miembros con esos roles no verán las etiquetas ni los cambios de etiquetas del historial, porque sus roles antiguos tampoco las veían. Es lo que había; si se quiere otra cosa, da el permiso a mano (Administración, Roles y permisos).
+- `source roles with tag permissions and no destination role`: un rol antiguo tenía permisos de etiquetas y no tiene rol en la instancia nueva (ni con su nombre ni con el reparto de arriba), así que no se ha dado nada por él. Normalmente es un rol sin membresías; si las tenía, el paso 6.3 tampoco las importó. Repite con `roles=<antiguo>:<nuevo>` si debe ir a algún rol.
+
+La línea `Roles:` dice qué permisos de etiquetas ha dado a cada rol y de qué rol antiguo vienen (por ejemplo `Developer +view_issue_tags (from rqWriter)`). Los roles antiguos internos (`Non member` y `Anonymous`) pasan a los internos de la instancia nueva. Si varios roles antiguos van al mismo rol nuevo, recibe la unión de sus permisos. La instancia nueva solo da de serie los permisos de etiquetas (`view_issue_tags`, `create_issue_tags`, `edit_issue_tags` y `add_wiki_tags`) al rol `Manager`, y esos no se quitan aunque el rol antiguo no los tuviera.
 - `active_issue_tags is off, as in the source`: en la instancia antigua las etiquetas estaban desactivadas en los ajustes del plugin. Están importadas, pero no se ven hasta activarlas (Administración, Tags).
 
 Copia los informes de la importación (`history-import-<fecha>.json` y `tags-import-<fecha>.json`):
@@ -273,7 +276,7 @@ docker run --rm -v "$PWD:/work" snapshots_gen-converter \
 
 Tiene que terminar en `Failures (0)`. Antes enseña las diferencias que la conversión hace a propósito (estados y campos renombrados, números de ítem nuevos, relaciones PORIS invertidas), para revisarlas. Un fallo nombra el ítem por su CSID y lo que no coincide. La línea "Labels cosmoSys lacks for its own native fields" no es un fallo de la migración: es la etiqueta de `csExtCode` y `csWLoad` que le falta a cosmoSys (ver "Qué cambia en la conversión").
 
-Por último, entra como administrador y abre dos o tres ítems con historial, la wiki y un proyecto privado con un usuario normal (con su contraseña de siempre). Con ese usuario normal abre también un ítem con etiquetas: tiene que ver las etiquetas y, en el historial, los cambios de etiquetas. Si no los ve, a su rol le falta el permiso `view_issue_tags` (paso 6.4).
+Por último, entra como administrador y abre dos o tres ítems con historial, la wiki y un proyecto privado con un usuario normal (con su contraseña de siempre). Con ese usuario normal abre también un ítem con etiquetas: tiene que ver las etiquetas y, en el historial, los cambios de etiquetas. Si no los ve, a su rol le falta el permiso `view_issue_tags`: mira la línea `Roles:` y los avisos del paso 6.4.
 
 ## 8. Abrir la instancia nueva
 

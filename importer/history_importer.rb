@@ -14,6 +14,15 @@ module SnapshotsGen
     DEFAULT_ROLE_MAP = {
       'rqMngr' => 'Manager', 'rqWriter' => 'Developer', 'rqReviewer' => 'Developer', 'rqReader' => 'Reporter'
     }.freeze
+    # The destination of a source role given to members (Role.builtin 0): a
+    # role with the same name, or the one DEFAULT_ROLE_MAP or roles=old:new
+    # names. The history import maps memberships with it and the tags import
+    # gives tag permissions with it, so both always agree.
+    def self.role_target(name, overrides = {})
+      mapping = DEFAULT_ROLE_MAP.merge(overrides || {})
+      Role.where(builtin: 0, name: name).first || (mapping[name] && Role.where(builtin: 0, name: mapping[name]).first)
+    end
+
     CUSTOM_FIELD_CLASSES = %w[IssueCustomField ProjectCustomField VersionCustomField UserCustomField
                               GroupCustomField TimeEntryCustomField DocumentCustomField].freeze
 
@@ -297,8 +306,7 @@ module SnapshotsGen
       end
 
       def role_target(name)
-        mapping = DEFAULT_ROLE_MAP.merge(@options.fetch('roles', {}))
-        Role.where(builtin: 0, name: name).first || (mapping[name] && Role.where(builtin: 0, name: mapping[name]).first)
+        Importer.role_target(name, @options.fetch('roles', {}))
       end
 
       # --- projects and items --------------------------------------------------
