@@ -472,19 +472,19 @@ importar() { docker exec -u redmine -w /usr/src/redmine "$NUEVO" bundle exec rai
 
 ## 6. Importar
 
-Son cuatro pasos, siempre en este orden.
+En el servidor nuevo, desde el directorio de trabajo y con `importar` definido (paso 5.4). Son cuatro pasos, siempre en este orden. El 6.2 puede tardar más de veinte minutos con un paquete grande: lanza las órdenes desde `tmux` o `screen`, para que un corte de la conexión SSH no deje la terminal a medias.
 
 Ninguno avisa a nadie: mientras corren, el importador hace que Redmine no vea eventos que notificar y descarta cualquier correo antes de encolarlo, solo dentro de su propio proceso y sin cambiar ningún ajuste de la instancia. Cada orden termina diciendo `Jobs queued: none`; si dice `WARNING: jobs queued during the import`, nombra los trabajos que se encolaron.
 
 **6.1. Preparar:** crea los usuarios que falten, con su contraseña, los grupos, las definiciones de los campos personalizados que se conservan y las actividades de tiempo. Empareja por login los usuarios que ya existan. Repetirlo no duplica nada.
 
 ```sh
-importar prepare /tmp/sg/pkg/<nombre>.cshistory
+importar prepare /tmp/sg/pkg/"$NOMBRE".cshistory
 ```
 
-Revisa lo que dice de los roles (`Role rqWriter -> Developer`...). Si un rol antiguo no tiene destino, sus membresías no se importarán; créalo en la instancia nueva o indica otro con `roles=rqWriter:Developer,...` en el paso 6.3.
+Termina con una línea `Prepared: created_users=N, ...`. Revisa lo que dice de los roles (`Role rqWriter -> Developer`...). Si un rol antiguo no tiene destino, sus membresías no se importarán; créalo en la instancia nueva o indica otro con `roles=rqWriter:Developer,...` en el paso 6.3. Si dice `Missing trackers (the .csys import will refuse their items): ...`, crea esos trackers (paso 5.3) y repite esta orden.
 
-**6.2. Importar cada `.csys`:** primero sin confirmar, que solo enseña el preflight de cosmoSys (el mismo que la interfaz):
+**6.2. Importar cada `.csys`:** hay uno por proyecto raíz de la instancia antigua (`ls migracion/convertido/*.csys`), y da igual en qué orden se importen. Cada uno, primero sin confirmar, que solo enseña el preflight de cosmoSys (el mismo que la interfaz):
 
 ```sh
 importar csys /tmp/sg/pkg/<nombre>-<identificador>.csys
@@ -498,34 +498,34 @@ importar csys /tmp/sg/pkg/<nombre>-<identificador>.csys confirm=yes
 
 Mientras importa, escribe una línea al empezar cada fase (`[ 10%] items 0/2000 (1 s)`) otra cada 30 segundos dentro de una fase larga y, si una fase pasa un minuto sin dar señales, una línea `still working`: un paquete grande puede tardar bastante más de un cuarto de hora. Durante la importación, el log de Rails solo recoge avisos y errores, para que se lean las líneas del importador. Al terminar dice `Imported <identificador>: N projects, M items.` y el tiempo total.
 
-Repite con cada `.csys`. Si el preflight dice `BLOCKING`, corrige lo que indique (normalmente un tracker o un campo que falta) y vuelve a empezar este paso; nada se ha escrito.
+Repite con cada `.csys`. Si el preflight dice `BLOCKING`, corrige lo que indique (normalmente un tracker que falta: `BLOCKING: Required trackers are unavailable: ...`) y vuelve a empezar con ese paquete; nada se ha escrito. Cada importación es una sola transacción: si falla o se corta, ese paquete no deja nada en la base y se repite. En el ensayo, un paquete pequeño tardó entre 10 y 40 segundos, y uno de unos 2000 ítems entre 16 y 23 minutos, casi todo en las fases `items`, `hierarchy`, `references` y `committing`.
 
 **6.3. Importar el historial**, primero en ensayo (escribe todo, lo verifica y lo deshace):
 
 ```sh
-importar history /tmp/sg/pkg/<nombre>.cshistory dry_run=yes
+importar history /tmp/sg/pkg/"$NOMBRE".cshistory dry_run=yes
 ```
 
 Si termina en `Dry run: everything was rolled back.`, impórtalo de verdad:
 
 ```sh
-importar history /tmp/sg/pkg/<nombre>.cshistory
+importar history /tmp/sg/pkg/"$NOMBRE".cshistory
 ```
 
 Al terminar de escribir el historial, y si la versión de cosmoSys las tiene, captura las líneas base de presentación de los ítems consolidados (por ejemplo, los requisitos que ya no están en borrador): son el texto aprobado con el que cosmoSys compara después, y sin ellas el ítem se lee "falta evidencia". La instancia antigua no las tenía, así que se toman del contenido migrado ya completo, como hace el script `scripts/capture_approved_presentation_baselines.rb` de cosmoSys con los ítems anteriores a esa función. Por eso el paso 6.2 no las captura, aunque la interfaz sí lo hace al importar un paquete: las referencias y relaciones entre paquetes no están completas hasta este paso.
 
-Todo ocurre en una sola transacción: o queda todo importado y verificado, o no queda nada. Al final dice cuántos journals, versiones de wiki, entradas de tiempo, observadores y membresías ha escrito, y deja un informe en `/tmp/sg/pkg/history-import-<fecha>.json` con lo que no pudo traducir. Lo que la conversión ya quitó está en su informe y no llega al importador, así que cualquier cosa que el importador descarte es algo que el informe de conversión no anunciaba: la última línea lo dice (`Dropped by the importer: none` o un `WARNING: the importer dropped N records that the conversion report does not announce`). En el JSON (formato `snapshots_gen-history-import-v1`), `dropped` lista cada registro con `kind`, `id` (en el origen) y `reason`, y los journals y cambios llevan además `journal` (el journal de origen), `item` y `csid` (el CSID del ítem en la instancia nueva); `dropped_counts` los cuenta por tipo. Cópialo:
+Todo ocurre en una sola transacción: o queda todo importado y verificado, o no queda nada. Al final dice cuántos journals, versiones de wiki, entradas de tiempo, observadores y membresías ha escrito, y deja un informe en `/tmp/sg/pkg/history-import-<fecha>.json` con lo que no pudo traducir. Lo que la conversión ya quitó está en su informe y no llega al importador, así que cualquier cosa que el importador descarte es algo que el informe de conversión no anunciaba: la última línea lo dice (`Dropped by the importer: none` o un `WARNING: the importer dropped N records that the conversion report does not announce`). En el JSON (formato `snapshots_gen-history-import-v1`), `dropped` lista cada registro con `kind`, `id` (en el origen) y `reason`, y los journals y cambios llevan además `journal` (el journal de origen), `item` y `csid` (el CSID del ítem en la instancia nueva); `dropped_counts` los cuenta por tipo. El informe se copia al final del paso 6.4.
 
 **6.4. Importar las etiquetas**, también primero en ensayo (escribe todo, lo verifica y lo deshace):
 
 ```sh
-importar tags /tmp/sg/pkg/<nombre>.cstags dry_run=yes
+importar tags /tmp/sg/pkg/"$NOMBRE".cstags dry_run=yes
 ```
 
 Si en el paso 6.3 usaste `roles=...`, añade lo mismo aquí. Si termina en `Dry run: everything was rolled back.`, impórtalas de verdad:
 
 ```sh
-importar tags /tmp/sg/pkg/<nombre>.cstags
+importar tags /tmp/sg/pkg/"$NOMBRE".cstags
 ```
 
 Tiene que terminar en `Tags imported.`. Antes de escribir nada comprueba que los plugins de etiquetas están instalados y migrados, que sus tablas son las que conoce, que cada ítem y cada página de wiki del paquete existe una sola vez en la instancia nueva y que no hay ya etiquetas que choquen con las del paquete. Después escribe las etiquetas directamente en las tablas del plugin, sin pasar por los ítems (no crea notas en el historial, no cambia la fecha de ningún ítem y no manda correo), pone los ajustes del plugin como estaban en la instancia antigua (si las etiquetas estaban activadas, las activa), da a cada rol de la instancia nueva los permisos de etiquetas que tenía su rol antiguo (la línea `Roles:` dice cuáles; solo añade, nunca quita) y, antes de confirmar, vuelve a leer la base y comprueba que cada ítem y cada página tiene exactamente las etiquetas del paquete, también los que no tenían ninguna, y que nada más ha cambiado. Todo ocurre en una sola transacción: o queda todo, o no queda nada.
@@ -538,15 +538,22 @@ Repetir la orden no cambia nada: la segunda vez dice `Nothing to import` y deja 
 La línea `Roles:` dice qué permisos de etiquetas ha dado a cada rol y de qué rol antiguo vienen (por ejemplo `Developer +view_issue_tags (from rqWriter)`). Los roles antiguos internos (`Non member` y `Anonymous`) pasan a los internos de la instancia nueva. Si varios roles antiguos van al mismo rol nuevo, recibe la unión de sus permisos. La instancia nueva solo da de serie los permisos de etiquetas (`view_issue_tags`, `create_issue_tags`, `edit_issue_tags` y `add_wiki_tags`) al rol `Manager`, y esos no se quitan aunque el rol antiguo no los tuviera.
 - `active_issue_tags is off, as in the source`: en la instancia antigua las etiquetas estaban desactivadas en los ajustes del plugin. Están importadas, pero no se ven hasta activarlas (Administración, Tags).
 
-Copia los informes de la importación (`history-import-<fecha>.json` y `tags-import-<fecha>.json`):
+Copia los informes de la importación (`history-import-<fecha>.json` y `tags-import-<fecha>.json`, los de los ensayos y los de las importaciones de verdad), y solo ellos:
 
 ```sh
-docker cp <contenedor-nuevo>:/tmp/sg/pkg/. migracion/importado
+mkdir -m 700 migracion/importado
+for f in $(docker exec "$NUEVO" sh -c 'cd /tmp/sg/pkg && ls *-import-*.json'); do docker cp "$NUEVO":/tmp/sg/pkg/"$f" migracion/importado/; done
+chmod -R go-rwx migracion
+find migracion -perm /077
 ```
 
 ## 7. Comprobar
 
-El importador ya verifica, antes de confirmar la transacción, que:
+En el servidor nuevo, desde el directorio de trabajo. La instancia sigue cerrada.
+
+### 7.1. Lo que el importador ya ha comprobado
+
+Antes de confirmar la transacción del historial, el importador verifica que:
 
 - los journals y los cambios escritos son los esperados;
 - ninguna nota sale como "Editada" y sus números siguen el orden de las fechas;
@@ -554,31 +561,54 @@ El importador ya verifica, antes de confirmar la transacción, que:
 - no queda ninguna referencia sin traducir;
 - ningún cambio del historial sale como "Translation missing", en inglés y en castellano.
 
-Además, compara el historial de cada ítem con el de la instancia antigua. Esta comprobación solo lee en las dos:
+Y el de etiquetas, antes de confirmar la suya, que cada ítem y cada página tiene exactamente las etiquetas del paquete. Además, todas las órdenes del paso 6 tienen que haber dicho `Jobs queued: none`.
+
+### 7.2. Comparar el historial con el de la instancia antigua
+
+Pinta el historial de cada ítem de la instancia nueva, en el mismo idioma que la referencia del paso 3.2, y lo compara con ella:
 
 ```sh
-docker cp snapshots_gen/test/history_text.rb <contenedor-antiguo>:/tmp/history_text.rb
-docker exec -u redmine -w /usr/src/redmine <contenedor-antiguo> bundle exec rails runner -e production /tmp/history_text.rb /tmp/origen.jsonl es
-docker cp <contenedor-antiguo>:/tmp/origen.jsonl migracion/
-docker exec -u 0 <contenedor-antiguo> rm -f /tmp/history_text.rb /tmp/origen.jsonl
-docker cp snapshots_gen/test/history_text.rb <contenedor-nuevo>:/tmp/sg/history_text.rb
-docker exec -u redmine -w /usr/src/redmine <contenedor-nuevo> bundle exec rails runner /tmp/sg/history_text.rb /tmp/sg/destino.jsonl es
-docker cp <contenedor-nuevo>:/tmp/sg/destino.jsonl migracion/
+docker exec -u redmine -w /usr/src/redmine "$NUEVO" bundle exec rails runner /tmp/sg/history_text.rb /tmp/sg/historial-destino.jsonl es
+docker cp "$NUEVO":/tmp/sg/historial-destino.jsonl migracion/
+INFORME=$(grep -l '"dry_run": false' migracion/importado/history-import-*.json); echo "$INFORME"
 docker run --rm -v "$PWD:/work" snapshots_gen-converter \
-  ruby snapshots_gen/test/compare_history.rb migracion/origen.jsonl migracion/destino.jsonl migracion/convertido/report.json \
-  --history migracion/convertido/<exportacion>.cshistory \
-  --import-report migracion/importado/history-import-<fecha>.json
+  ruby snapshots_gen/test/compare_history.rb migracion/historial-origen.jsonl migracion/historial-destino.jsonl migracion/convertido/report.json \
+  --history migracion/convertido/"$NOMBRE".cshistory \
+  --import-report "$INFORME"
 ```
 
-Sustituye `<exportacion>` y `<fecha>` por los nombres de los ficheros de esta ejecución. Copia el informe JSON de la importación real del historial desde `/tmp/sg/pkg/` del contenedor nuevo a `migracion/importado/` (no uses el informe del ensayo). Si hay varios informes de importación real que correspondan a esta migración, repite `--import-report` para cada uno.
+El `echo` tiene que enseñar un solo fichero: el informe de la importación de verdad del paso 6.3, no el del ensayo (el comparador rechaza el del ensayo).
 
-Tiene que terminar en `Failures (0)` y `Unexplained differences (0)`; devuelve 1 si cualquiera es distinto de cero y 2 si no puede leer o validar las entradas. `Explained differences` agrupa los cambios por regla del conversor o entrada concreta de `report.json`; añade `--details` para ver su detalle o `--show CSID` para inspeccionar un ítem. Un detalle perdido sin descarte declarado, un descarte del importador, una referencia a otro ítem, una nota editada y cualquier `Translation missing` son fallos. Las diferencias de presentación que no cubra una regla siguen en `Unexplained differences` y requieren investigación, nunca se aceptan automáticamente.
+Tiene que terminar en `Failures (0)` y `Unexplained differences (0)`; devuelve 1 si cualquiera es distinto de cero y 2 si no puede leer o validar las entradas. Antes dice `Items: N in the source, N in the target`. `Explained differences` agrupa los cambios por regla del conversor o entrada concreta de `report.json`; añade `--details` para ver su detalle o `--show CSID` para inspeccionar un ítem. Un detalle perdido sin descarte declarado, un descarte del importador, una referencia a otro ítem, una nota editada y cualquier `Translation missing` son fallos. Las diferencias de presentación que no cubra una regla siguen en `Unexplained differences` y requieren investigación, nunca se aceptan automáticamente.
 
 Los recuentos de explicaciones son por regla aplicada, no por journal: un detalle puede tener una explicación para sus valores y otra para su presentación.
 
 Los dos JSONL deben generarse con la misma versión de `history_text.rb` (formato `history-text-v2`) y el mismo idioma. Conservan los valores completos, incluso los que el Redmine antiguo oculta al pintar campos de texto largo, y son material sensible. La extracción los crea con modo 600; protege también cualquier salida de `--details` o `--show`. Este paso comprueba historial e identidades, no sustituye la comprobación del estado actual ni la de etiquetas.
 
-Por último, entra como administrador y abre dos o tres ítems con historial, la wiki y un proyecto privado con un usuario normal (con su contraseña de siempre). Con ese usuario normal abre también un ítem con etiquetas: tiene que ver las etiquetas y, en el historial, los cambios de etiquetas. Si no los ve, a su rol le falta el permiso `view_issue_tags`: mira la línea `Roles:` y los avisos del paso 6.4.
+### 7.3. Comparar las etiquetas con las de la instancia antigua
+
+Lee por SQL todas las etiquetas de la instancia nueva, sin pasar por el plugin, y las compara con la referencia del paso 3.2:
+
+```sh
+docker exec -u redmine -w /usr/src/redmine "$NUEVO" bundle exec rails runner /tmp/sg/tags/extract_target.rb /tmp/sg/etiquetas-destino.jsonl
+docker cp "$NUEVO":/tmp/sg/etiquetas-destino.jsonl migracion/
+chmod -R go-rwx migracion
+docker run --rm -v "$PWD:/work" snapshots_gen-converter \
+  ruby snapshots_gen/test/tags/compare.rb migracion/etiquetas-origen.jsonl migracion/etiquetas-destino.jsonl migracion/convertido/report.json
+```
+
+La extracción dice `tags evidence: objects=N tags=N assignments=N`. La comparación enseña `Tags: N source, N target` y `Assignments: N source, N target` con los mismos números a los dos lados, `order: not-certified` (el orden de las etiquetas no se conserva, como se dijo) y tiene que terminar en `Failures (0)`, con código 0. Compara cada nombre byte a byte, sin recortar espacios ni cambiar mayúsculas, cada etiqueta de cada ítem y de cada página, sus fechas, los ajustes del plugin y los contadores. Devuelve 1 si hay diferencias y 2 si una de las dos capturas no es válida. Por defecto no enseña nombres de etiquetas, solo huellas; `--show-names` los enseña y su salida es material sensible.
+
+No comprueba quién ve las etiquetas: eso es el 7.4.
+
+### 7.4. Revisar a mano
+
+Entra por el túnel SSH del paso 5.2 (`http://localhost:8080`):
+
+- Como `admin`, abre dos o tres ítems con historial, la wiki de un proyecto y un proyecto privado. El historial tiene que leerse como en la instancia antigua, con sus autores y fechas.
+- Con una cuenta normal, sin permisos de administrador y con su contraseña de siempre (por ejemplo, la de un compañero que esté contigo), abre un proyecto en el que sea miembro y un ítem con etiquetas: tiene que ver las etiquetas y, en el historial, los cambios de etiquetas. Si no los ve, a su rol le falta el permiso `view_issue_tags`: mira la línea `Roles:` y los avisos del paso 6.4.
+
+Si no hay nadie con cuenta normal a mano, crea un usuario de prueba después de 7.2 y 7.3, hazlo miembro de un proyecto con etiquetas con el rol que tienen la mayoría (`Developer` o `Reporter`), compruébalo y bórralo al terminar (Administración, Usuarios).
 
 ## 8. Abrir la instancia nueva
 
