@@ -65,4 +65,4 @@ bin/verify-cstags PACKAGE.cstags history=PACKAGE.cshistory csys=ROOT.csys ...
 
 ## License
 
-GPL-3.0, like cosmoSys, whose snapshot code this tool derives from.
+GPL-3.0-only, like cosmoSys, whose snapshot code this tool derives from. `LICENSE` holds the licence text and the Redmine licensing note it inherits from cosmoSys. The canonical JSON writer in `exporter/legacy_snapshot_format.rb` is adapted from `lib/cosmosys/canonical_json.rb` of cosmoSys, with changes for date values; the importer calls the snapshot classes of the cosmoSys instance it runs in and copies none of them.
