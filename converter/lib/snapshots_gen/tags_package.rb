@@ -63,6 +63,7 @@ module SnapshotsGen
     BUILTIN_ROLES = { 1 => 'non_member', 2 => 'anonymous' }.freeze
     LIST_SEPARATOR = ','
     MAX_NAME_LENGTH = 255
+    BLANK = /\A[[:space:]]*\z/.freeze
     SCOPE_SEPARATOR = '::'
     GROUP_SEPARATOR = ':'
 
@@ -125,7 +126,9 @@ module SnapshotsGen
       text = name.dup.force_encoding(Encoding::UTF_8)
       return ['invalid_name', 'empty'] if text.empty?
       return ['invalid_name', 'contains U+0000'] if text.include?("\u0000")
-      return ['invalid_name', 'only spaces'] if text.strip.empty?
+      # String#blank? of ActiveSupport: the TagList of 4.6.0 drops these
+      # names, which String#strip alone would not see (U+00A0, U+3000...).
+      return ['invalid_name', 'only spaces'] if text.strip.empty? || BLANK.match?(text)
       return ['invalid_name', 'leading or trailing spaces'] if text.strip != text
       return ['invalid_name', "longer than #{MAX_NAME_LENGTH} characters"] if text.length > MAX_NAME_LENGTH
 

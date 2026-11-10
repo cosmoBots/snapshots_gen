@@ -223,7 +223,7 @@ Sorted by `code`, `table` and `source_ids`. The codes of version 1:
 | `missing_column` | blocking | An expected column is not in a table. |
 | `unknown_column` | blocking | A table has columns without an approved mapping (their values are in `source_extra`). |
 | `invalid_key` | blocking | A tag or tagging `id` is null or repeated. |
-| `invalid_name` | blocking | A name is null, empty, only spaces, has leading or trailing spaces (the destination model strips them), holds U+0000 (PostgreSQL cannot store it) or is longer than 255 characters. |
+| `invalid_name` | blocking | A name is null, empty, only spaces (any Unicode space, as `String#blank?` of ActiveSupport sees them: the tag list of 4.6.0 drops such a name), has leading or trailing spaces (the destination model strips them), holds U+0000 (PostgreSQL cannot store it) or is longer than 255 characters. |
 | `invalid_encoding` | blocking | A name is not valid UTF-8. |
 | `duplicate_name` | blocking | Two tags have exactly the same name. |
 | `orphan_tag` | blocking | A tagging's `tag_id` is null or names no unique tag. |

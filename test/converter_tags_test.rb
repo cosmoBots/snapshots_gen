@@ -176,6 +176,24 @@ class ConverterTagsTest < Minitest::Test
     end
   end
 
+  # R5 of the adversarial review: names made only of Unicode spaces are blank
+  # for ActiveSupport, and the TagList of 4.6.0 drops them; a valid name with
+  # a no-break space inside or at an edge stays as it is.
+  def test_names_of_unicode_spaces_only_block
+    tags = [tag(1, "\u00a0"), tag(2, "\u2003"), tag(3, "\u3000\u00a0"), tag(4, "no\u00a0break"), tag(5, "edge\u00a0")]
+    # Issue 5 is absorbed into a document: the last tag goes to issue 6.
+    taggings = tags.map { |row| tagging(row['id'], row['id'], 'Issue', row['id'] == 5 ? 6 : row['id']) }
+    convert(tag_tables(tags, taggings)) do |package|
+      refute package.importable?
+      assert_equal %w[invalid_name], blocking(package)
+      invalid = package.rows.fetch('anomalies').select { |row| row['code'] == 'invalid_name' }
+      assert_equal [[1], [2], [3]], invalid.map { |row| row['source_ids'] }
+      assert_equal ["no\u00a0break", "edge\u00a0"], package.rows.fetch('tags').last(2).map { |row| row['name'] }
+    end
+    %W[\u00a0 \u2003 \u205f \u3000 \u2028].each { |name| assert TP.name_problem(name), name.inspect }
+    assert_nil TP.name_problem("no\u00a0break")
+  end
+
   def test_tag_permissions_of_the_source_roles
     tables = tag_tables([tag(1, 'one', 1)], [tagging(1, 1, 'Issue', 1)])
     tables['roles'] += [
