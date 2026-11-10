@@ -89,20 +89,33 @@ module SnapshotsGen
       loggers&.zip(levels)&.each { |logger, level| logger.level = level }
     end
 
-    # One line when a phase of the materialization starts, and one every
-    # 30 seconds within a long phase, so a large package does not look hung.
-    def progress_printer
-      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      last = { phase: nil, at: -Float::INFINITY }
-      lambda do |percent, phase, details|
-        now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        next if phase == last[:phase] && now - last[:at] < 30
+    # One line when a phase of the materialization starts and one every
+    # 30 seconds within a long phase; some phases report nothing for minutes,
+    # so a line also comes after a minute without any. A large package must
+    # not look hung.
+    def with_progress
+      clock = -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+      started = clock.call
+      state = { phase: nil, percent: 0, at: -Float::INFINITY }
+      line = ->(text) { puts format('  [%3d%%] %s (%d s)', state[:percent], text, (clock.call - started).round) }
+      printer = lambda do |percent, phase, details|
+        next if phase == state[:phase] && clock.call - state[:at] < 30
 
-        last[:phase] = phase
-        last[:at] = now
-        count = details[:total] ? " #{details[:processed].to_i}/#{details[:total]}" : ''
-        puts format('  [%3d%%] %s%s (%d s)', percent.to_i, phase, count, (now - started).round)
+        state.update(phase: phase, percent: percent.to_i, at: clock.call)
+        line.call(details[:total] ? "#{phase} #{details[:processed].to_i}/#{details[:total]}" : phase.to_s)
       end
+      heartbeat = Thread.new do
+        loop do
+          sleep 5
+          next if state[:phase].nil? || clock.call - state[:at] < 60
+
+          state[:at] = clock.call
+          line.call("#{state[:phase]}, still working")
+        end
+      end
+      yield printer
+    ensure
+      heartbeat&.kill
     end
 
     def admin
@@ -150,14 +163,16 @@ module SnapshotsGen
         end
         options = {}
         parameters = Cosmosys::ProjectSnapshotMaterializer.instance_method(:initialize).parameters.map(&:last)
-        # cosmoSys versions that report progress take a callback.
-        options[:progress] = progress_printer if parameters.include?(:progress)
         # Not :snapshot, as the interface: with :snapshot cosmoSys Requirements
         # captures the approved presentation baselines here, before the
         # history import completes cross-package references and relations.
         # The history import captures them at its end.
         options[:purpose] = :materialization if parameters.include?(:purpose)
-        project = Cosmosys::ProjectSnapshotMaterializer.new(source, user: admin, attributes: attributes, **options).call
+        project = with_progress do |printer|
+          # cosmoSys versions that report progress take a callback.
+          options[:progress] = printer if parameters.include?(:progress)
+          Cosmosys::ProjectSnapshotMaterializer.new(source, user: admin, attributes: attributes, **options).call
+        end
         tree = Project.find(project.id).self_and_descendants.pluck(:id)
         puts "Imported #{project.identifier}: #{tree.length} projects, #{Issue.where(project_id: tree).count} items."
       end

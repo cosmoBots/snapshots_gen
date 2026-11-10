@@ -202,7 +202,7 @@ Si termina en `Preflight passed`, impórtalo:
 importar csys /tmp/sg/pkg/<nombre>-<identificador>.csys confirm=yes
 ```
 
-Mientras importa, escribe una línea al empezar cada fase (`[ 10%] items 0/2000 (1 s)`) y otra cada 30 segundos dentro de una fase larga: un paquete grande puede tardar bastante más de un cuarto de hora. Durante la importación, el log de Rails solo recoge avisos y errores, para que se lean las líneas del importador. Al terminar dice `Imported <identificador>: N projects, M items.` y el tiempo total.
+Mientras importa, escribe una línea al empezar cada fase (`[ 10%] items 0/2000 (1 s)`) otra cada 30 segundos dentro de una fase larga y, si una fase pasa un minuto sin dar señales, una línea `still working`: un paquete grande puede tardar bastante más de un cuarto de hora. Durante la importación, el log de Rails solo recoge avisos y errores, para que se lean las líneas del importador. Al terminar dice `Imported <identificador>: N projects, M items.` y el tiempo total.
 
 Repite con cada `.csys`. Si el preflight dice `BLOCKING`, corrige lo que indique (normalmente un tracker o un campo que falta) y vuelve a empezar este paso; nada se ha escrito.
 
