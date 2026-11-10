@@ -52,6 +52,7 @@ module SnapshotsGen
       'additional_taggings' => %w[id tag_id taggable_id taggable_type tagger_id tagger_type context created_at]
     }.freeze
     TAGGABLE_TYPES = %w[Issue WikiPage].freeze
+    LIST_SEPARATOR = ','
     MAX_NAME_LENGTH = 255
     SCOPE_SEPARATOR = '::'
     GROUP_SEPARATOR = ':'
@@ -91,6 +92,7 @@ module SnapshotsGen
       'unused_tag' => ['warning', 'Tags without taggings: imported, but the new plugin deletes unused tags after edits'],
       'case_variant_names' => ['warning', 'Names equal except for case: kept apart, but the new tag API matches them as one'],
       'scoped_tag_conflict' => ['warning', 'Objects with two tags of the same "group::" scope, which the new plugin rejects on edit'],
+      'comma_in_name' => ['warning', 'Names with a comma: kept as one tag, but the new plugin splits them at the comma when the object is edited'],
       'counter_mismatch' => ['information', 'Tags whose stored taggings_count differs from their real count (recomputed on import)']
     }.freeze
     SEVERITIES = %w[blocking warning information].freeze

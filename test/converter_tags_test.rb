@@ -82,7 +82,11 @@ class ConverterTagsTest < Minitest::Test
       assert package.importable?, package.rows.fetch('anomalies').inspect
       assert_equal true, summary['tags_importable']
       assert_equal 'test.cstags', summary['tags_package']
-      assert_equal %w[case_variant_names counter_mismatch unused_tag], codes(package).keys.sort
+      assert_equal %w[case_variant_names comma_in_name counter_mismatch unused_tag], codes(package).keys.sort
+      # Only "A,B" has a comma; it stays one tag and is reported.
+      comma = package.rows.fetch('anomalies').select { |row| row['code'] == 'comma_in_name' }
+      assert_equal [[1]], comma.map { |row| row['source_ids'] }
+      assert_equal 'warning', comma.first['severity']
 
       # Every name exactly as stored, also the unused one.
       assert_equal names, package.rows.fetch('tags').map { |row| row['name'] }
@@ -132,7 +136,8 @@ class ConverterTagsTest < Minitest::Test
 
       # The conversion report counts codes and never names a tag.
       assert_equal 0, report['counts'].fetch('tags_blocking', 0)
-      assert_equal 2, report['counts']['tags_warning']
+      assert_equal 3, report['counts']['tags_warning']
+      assert_includes report['entries'].map { |entry| entry['subject'] }, 'comma_in_name'
       dumped = JSON.generate(report)
       names.each { |name| refute_includes dumped, JSON.generate(name)[1..-2] if name.length > 3 }
       refute(report['entries'].any? { |entry| entry['code'] == 'plugin_data_not_migrated' && entry['subject'].start_with?('additional_') })

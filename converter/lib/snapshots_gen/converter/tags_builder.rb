@@ -241,6 +241,13 @@ module SnapshotsGen
 
           anomaly('case_variant_names', 'tags', group.map { |row| row_id(row) }, "#{group.length} names equal except for case")
         end
+        # The 4.6.0 plugin reads the tag field of a form as a comma separated
+        # list, so the first ordinary edit of the object splits these names.
+        tags.each do |row|
+          next unless row['name'].is_a?(String) && row['name'].include?(TagsPackage::LIST_SEPARATOR)
+
+          anomaly('comma_in_name', 'tags', [row_id(row)], 'name has a comma')
+        end
         counts = taggings.group_by { |row| row['tag_id'] }.transform_values(&:length)
         TagsPackage.tags_by_id(tags).each do |id, row|
           real = counts.fetch(id, 0)

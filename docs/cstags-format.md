@@ -223,6 +223,7 @@ Sorted by `code`, `table` and `source_ids`. The codes of version 1:
 | `unused_tag` | warning | A tag has no taggings. It is imported, but the 4.6.0 plugin deletes unused tags after any later edit of an item (`AdditionalTagsRemoveUnusedTagJob`). |
 | `case_variant_names` | warning | Names equal except for case. They stay apart, but the new tag API looks names up ignoring case. |
 | `scoped_tag_conflict` | warning | An object has two tags of the same `group::` scope, which 4.6.0 rejects when the object is edited. |
+| `comma_in_name` | warning | A name has a comma. It is imported as one tag, exactly, but the tag field of 4.6.0 is a comma separated list: the first ordinary edit of an object with this tag splits it into several tags. |
 | `counter_mismatch` | information | A stored `taggings_count` differs from the real count. |
 
 ## Verification
@@ -260,4 +261,4 @@ Tag changes in the history are not part of this package. The old plugin recorded
 
 ## Versioning
 
-Version 1 readers accept only `schema` `cosmosys-tags` and `schema_version` `"1"`. Any change to identity, names, context, tagger, order, the profile or the meaning of a row needs a new version, and so does any new exception to the strict profile. The version 1 verifier also rejects keys, anomaly codes and counts it does not know, so adding any of them needs a new version as well.
+Version 1 readers accept only `schema` `cosmosys-tags` and `schema_version` `"1"`. Version 1 was extended in place before any package was published; the code `comma_in_name` is part of it. Any change to identity, names, context, tagger, order, the profile or the meaning of a row needs a new version, and so does any new exception to the strict profile. The version 1 verifier also rejects keys, anomaly codes and counts it does not know, so adding any of them needs a new version as well.
