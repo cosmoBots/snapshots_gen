@@ -568,6 +568,63 @@ class CompareHistoryTest < Minitest::Test
                           attachment_report(reason: 'not migrated with this item')).ok?
   end
 
+  def multiple_detail(id, old, value, label: 'Risk', multiple: true)
+    shown = value ? "Añadido #{label} #{value}" : "#{label} eliminado (#{old})"
+    row = detail('Risk', old, value, id: id, property: 'cf', key: '5', label: label, rendered: [shown])
+    row.merge!('field_format' => 'list', 'multiple' => multiple, 'display_old' => old, 'display_value' => value)
+  end
+
+  # Redmine 4.2 and 7 (IssuesHelper#details_to_strings) render the values
+  # added to one multiple custom field in one line, and the removed ones in
+  # another, after the other changes of the journal.
+  def grouped(details, lines)
+    source, target = item, item(101)
+    source['render_templates'] = target['render_templates'] = templates
+    source['journals'] = [journal(details)]
+    target['journals'] = [journal(copy(details).each_with_index.map { |row, index| row.merge('id' => 50 + index) }, '', 101)]
+    source['journals'][0]['details'] = lines
+    target['journals'][0]['details'] = copy(lines)
+    compare(source, target)
+  end
+
+  def test_r5b_grouped_multiple_values_are_explained_only_by_the_exact_multiset
+    details = [multiple_detail(1, nil, 'Alto'), multiple_detail(2, nil, 'Bajo'), multiple_detail(3, 'Medio', nil),
+               detail('subject', 'before', 'after', id: 4)]
+    lines = ['subject changed from before to after', 'Añadido Risk Alto, Bajo', 'Risk eliminado (Medio)']
+    result = grouped(details, lines)
+    assert result.ok?, result.unexplained.inspect
+    assert_equal 2, result.explained.select { |reason, _rows| reason.start_with?('R5b') }.values.flatten.length
+    assert grouped(details, lines.reverse).ok?, 'line order'
+    assert grouped(details, [lines[0], 'Añadido Risk Bajo, Alto', lines[2]]).ok?, 'value order'
+
+    {
+      'a value missing' => [lines[0], 'Añadido Risk Alto', lines[2]],
+      'a value repeated' => [lines[0], 'Añadido Risk Alto, Bajo, Bajo', lines[2]],
+      'a value changed' => [lines[0], 'Añadido Risk Alto, Medio', lines[2]],
+      'removed shown as added' => [lines[0], 'Añadido Risk Alto, Bajo, Medio'],
+      'another label' => [lines[0], 'Añadido Riesgo Alto, Bajo', lines[2]],
+      'a line missing' => lines.last(2),
+      'a line repeated' => lines + [lines[2]],
+      'not grouped but joined differently' => [lines[0], 'Añadido Risk Alto; Bajo', lines[2]]
+    }.each do |name, wrong|
+      refute grouped(details, wrong).ok?, name
+    end
+  end
+
+  def test_r5b_needs_a_multiple_field_and_the_same_count_of_each_value
+    single = [multiple_detail(1, nil, 'Alto', multiple: false), multiple_detail(2, nil, 'Bajo', multiple: false)]
+    refute grouped(single, ['Añadido Risk Alto, Bajo']).ok?, 'not a multiple field'
+    twice = [multiple_detail(1, nil, 'Alto'), multiple_detail(2, nil, 'Alto')]
+    assert grouped(twice, ['Añadido Risk Alto, Alto']).ok?
+    refute grouped(twice, ['Añadido Risk Alto']).ok?
+    commas = [multiple_detail(1, nil, 'a, b'), multiple_detail(2, nil, 'c')]
+    assert grouped(commas, ['Añadido Risk c, a, b']).ok?, 'a value with a comma'
+    refute grouped(commas, ['Añadido Risk a, b']).ok?
+    missing_display = [multiple_detail(1, nil, 'Alto'), multiple_detail(2, nil, 'Bajo')]
+    missing_display[1]['display_value'] = nil
+    refute grouped(missing_display, ['Añadido Risk Alto, Bajo']).ok?, 'no display value to prove it'
+  end
+
   def test_data_section_is_tied_to_a_project_with_reported_variables
     source, target, section = item, item(101), item(102, 'DEMO-0002')
     section.merge!('tracker' => 'csData', 'subject' => 'Project data', 'parent_id' => nil)

@@ -391,9 +391,81 @@ module HistoryComparison
       remaining.each { |detail| @failures << "#{where}: unexpected target detail ##{detail['id']} #{detail['property']}/#{detail['field']}" }
       # The aggregate renderer can group/reorder details. Do not ignore a
       # discrepancy that is absent from the individual renders.
-      [before, after].each do |journal|
-        if journal['details'].sort != journal['raw_details'].flat_map { |d| d['rendered'] }.sort
+      [[before, old], [after, new]].each do |journal, row|
+        next if journal['details'].sort == journal['raw_details'].flat_map { |d| d['rendered'] }.sort
+
+        if grouped_rendering?(journal, row['render_templates'])
+          explain('R5b multiple custom field values grouped in one line [IssuesHelper#details_to_strings]',
+                  "#{where} (journal ##{journal['id']})")
+        else
           @unexplained << "#{where}: aggregate rendering cannot be accounted for by individual details (journal ##{journal['id']})"
+        end
+      end
+    end
+
+    # R5b. Redmine 4.2 and 7 (IssuesHelper#details_to_strings) render every
+    # change of a journal on its own line except those of a multiple custom
+    # field: the values added to one such field go in one "added" line, and
+    # the removed ones in one "deleted" line, each list joined with ", ". The
+    # aggregate is accepted only if it is exactly those lines: the other
+    # changes as rendered alone, and for each multiple field the lines that
+    # hold exactly the multiset of its added and removed values (as the same
+    # renderer displays each one), in any order.
+    def grouped_rendering?(journal, templates)
+      return false unless templates
+
+      remaining = journal['details'].dup
+      take = lambda do |line|
+        index = remaining.index(line)
+        index && remaining.delete_at(index)
+      end
+      groups = {}
+      journal['raw_details'].each do |detail|
+        unless detail['property'] == 'cf' && detail['multiple']
+          return false unless detail['rendered'].all? { |line| take.call(line) }
+
+          next
+        end
+        group = (groups[detail['prop_key']] ||= { 'label' => detail['label'], 'added' => [], 'deleted' => [] })
+        return false unless group['label'] == detail['label']
+
+        # Redmine tests presence (nil), not emptiness.
+        { 'old_value' => %w[deleted display_old], 'value' => %w[added display_value] }.each do |side, (list, display)|
+          next if detail[side].nil?
+          return false unless detail[display].is_a?(String) && !detail[display].empty?
+
+          group[list] << detail[display]
+        end
+      end
+      groups.each_value do |group|
+        { 'added' => '%{value}', 'deleted' => '%{old}' }.each do |list, placeholder|
+          next if group[list].empty?
+
+          prefix, suffix = templates.fetch(list).gsub('%{label}') { group['label'] }.split(placeholder, 2)
+          return false unless suffix
+
+          line = remaining.find do |candidate|
+            candidate.start_with?(prefix) && candidate.end_with?(suffix) && candidate.length >= prefix.length + suffix.length &&
+              joined_values?(candidate[prefix.length...(candidate.length - suffix.length)], group[list])
+          end
+          return false unless line && take.call(line)
+        end
+      end
+      remaining.empty?
+    end
+
+    # Whether text is exactly the values (a multiset) joined with ", " in
+    # some order. Values may themselves hold ", ".
+    def joined_values?(text, values)
+      return text.empty? if values.empty?
+
+      values.uniq.any? do |value|
+        rest = values.dup
+        rest.delete_at(rest.index(value))
+        if rest.empty?
+          text == value
+        else
+          text.start_with?("#{value}, ") && joined_values?(text[(value.length + 2)..], rest)
         end
       end
     end
