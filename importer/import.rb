@@ -38,23 +38,31 @@ module SnapshotsGen
         exit 2
       end
 
+      $stdout.sync = true
       User.current = admin
-      summary = report = nil
-      Silence.run do
-        case command
-        when 'prepare' then Package.open(path) { |package| Run.new(package, options).prepare! }
-        when 'csys' then import_csys(path, options)
-        when 'history'
-          Package.open(path) { |package| summary = Run.new(package, options).history! }
-          report = File.join(File.dirname(File.expand_path(path)), "history-import-#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}.json")
-          File.write(report, JSON.pretty_generate(summary) + "\n")
-          puts "Statistics: #{summary['stats'].map { |key, value| "#{key}=#{value}" }.join(', ')}"
-        end
-      end
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      summary, report = quiet_log { Silence.run { run(command, path, options) } }
+      puts "Time: #{(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round} s"
       print_dropped(summary, report) if summary
     rescue Error => error
       warn "error: #{error.message}"
       exit 1
+    end
+
+    # Returns the summary of a history import and the path of its report.
+    def run(command, path, options)
+      case command
+      when 'prepare' then Package.open(path) { |package| Run.new(package, options).prepare! }
+      when 'csys' then import_csys(path, options)
+      when 'history'
+        summary = nil
+        Package.open(path) { |package| summary = Run.new(package, options).history! }
+        report = File.join(File.dirname(File.expand_path(path)), "history-import-#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}.json")
+        File.write(report, JSON.pretty_generate(summary) + "\n")
+        puts "Statistics: #{summary['stats'].map { |key, value| "#{key}=#{value}" }.join(', ')}"
+        return [summary, report]
+      end
+      nil
     end
 
     # Whatever the importer drops was in the history package: the conversion
@@ -67,6 +75,34 @@ module SnapshotsGen
       counts = summary['dropped_counts'].map { |kind, count| "#{kind} #{count}" }.join(', ')
       puts "WARNING: the importer dropped #{summary['dropped'].length} records that the conversion report " \
            "does not announce (#{counts}). They are listed under \"dropped\" in #{report}."
+    end
+
+    # cosmoSys logs a progress line every second and Rails logs every job and
+    # attachment, burying the importer's own lines: while it runs, only
+    # warnings and errors reach the log.
+    def quiet_log
+      loggers = [Rails.logger, ActiveRecord::Base.logger, ActiveJob::Base.logger, ActionMailer::Base.logger].compact.uniq
+      levels = loggers.map(&:level)
+      loggers.each { |logger| logger.level = Logger::WARN }
+      yield
+    ensure
+      loggers&.zip(levels)&.each { |logger, level| logger.level = level }
+    end
+
+    # One line when a phase of the materialization starts, and one every
+    # 30 seconds within a long phase, so a large package does not look hung.
+    def progress_printer
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      last = { phase: nil, at: -Float::INFINITY }
+      lambda do |percent, phase, details|
+        now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        next if phase == last[:phase] && now - last[:at] < 30
+
+        last[:phase] = phase
+        last[:at] = now
+        count = details[:total] ? " #{details[:processed].to_i}/#{details[:total]}" : ''
+        puts format('  [%3d%%] %s%s (%d s)', percent.to_i, phase, count, (now - started).round)
+      end
     end
 
     def admin
@@ -112,7 +148,12 @@ module SnapshotsGen
           puts 'Preflight passed. Run again with confirm=yes to import.'
           return
         end
-        project = Cosmosys::ProjectSnapshotMaterializer.new(source, user: admin, attributes: attributes).call
+        options = {}
+        # cosmoSys versions that report progress take a callback.
+        if Cosmosys::ProjectSnapshotMaterializer.instance_method(:initialize).parameters.any? { |_type, name| name == :progress }
+          options[:progress] = progress_printer
+        end
+        project = Cosmosys::ProjectSnapshotMaterializer.new(source, user: admin, attributes: attributes, **options).call
         tree = Project.find(project.id).self_and_descendants.pluck(:id)
         puts "Imported #{project.identifier}: #{tree.length} projects, #{Issue.where(project_id: tree).count} items."
       end
