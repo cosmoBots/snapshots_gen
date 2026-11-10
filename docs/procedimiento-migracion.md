@@ -151,7 +151,7 @@ En el paso 10, con una lista cerrada y una comprobación de que no queda nada. `
 
 Con otras versiones no está ensayado. El importador usa clases internas de cosmoSys que cambian de una versión a otra, y el de etiquetas se niega si `additional_tags` no es 4.6. Con otra versión de cosmoSys, ensaya antes el procedimiento entero (pasos 1 a 7) con una copia, sobre una instancia desechable.
 
-Hace falta un `cosmoSys_deploy` cuyo pin de cosmoSys sea la 0.2.10. Compruébalo en el checkout del deploy del servidor nuevo, antes del paso 5:
+Hace falta un `cosmoSys_deploy` cuyo pin de cosmoSys sea la 0.2.10. Compruébalo antes del paso 5, en el servidor nuevo y desde el directorio del checkout del deploy:
 
 ```sh
 git ls-remote https://github.com/cosmoBots/cosmoSys.git 'refs/tags/0.2.10^{}'
@@ -534,9 +534,9 @@ Repetir la orden no cambia nada: la segunda vez dice `Nothing to import` y deja 
 
 - `roles ... lack the view_issue_tags permission, also after the import`: los miembros con esos roles no verán las etiquetas ni los cambios de etiquetas del historial, porque sus roles antiguos tampoco las veían. Es lo que había; si se quiere otra cosa, da el permiso a mano (Administración, Roles y permisos).
 - `source roles with tag permissions and no destination role`: un rol antiguo tenía permisos de etiquetas y no tiene rol en la instancia nueva (ni con su nombre ni con el reparto de arriba), así que no se ha dado nada por él. Normalmente es un rol sin membresías; si las tenía, el paso 6.3 tampoco las importó. Repite con `roles=<antiguo>:<nuevo>` si debe ir a algún rol.
+- `active_issue_tags is off, as in the source`: en la instancia antigua las etiquetas estaban desactivadas en los ajustes del plugin. Están importadas, pero no se ven hasta activarlas (Administración, Tags).
 
 La línea `Roles:` dice qué permisos de etiquetas ha dado a cada rol y de qué rol antiguo vienen (por ejemplo `Developer +view_issue_tags (from rqWriter)`). Los roles antiguos internos (`Non member` y `Anonymous`) pasan a los internos de la instancia nueva. Si varios roles antiguos van al mismo rol nuevo, recibe la unión de sus permisos. La instancia nueva solo da de serie los permisos de etiquetas (`view_issue_tags`, `create_issue_tags`, `edit_issue_tags` y `add_wiki_tags`) al rol `Manager`, y esos no se quitan aunque el rol antiguo no los tuviera.
-- `active_issue_tags is off, as in the source`: en la instancia antigua las etiquetas estaban desactivadas en los ajustes del plugin. Están importadas, pero no se ven hasta activarlas (Administración, Tags).
 
 Copia los informes de la importación (`history-import-<fecha>.json` y `tags-import-<fecha>.json`, los de los ensayos y los de las importaciones de verdad), y solo ellos:
 
