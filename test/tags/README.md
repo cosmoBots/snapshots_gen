@@ -12,7 +12,7 @@ El resultado dice siempre `order: not-certified`. La extracción SQL deja `sourc
 
 ## Ejecución en un ensayo
 
-Mantén ambas instancias congeladas y usa un destino reservado para la migración completa. Se incluyen todos los objetos y todo el catálogo global: un proyecto o una etiqueta ajenos en destino producirán diferencias. Desde el directorio que contiene `snapshots_gen/`, sustituye los nombres entre `<...>`:
+Mantén ambas instancias congeladas y usa un destino reservado para la migración completa. Se incluyen todos los objetos y todo el catálogo global: una etiqueta ajena en destino produce diferencias. Los objetos de destino de un proyecto que no está en el origen (toda instancia nueva de cosmoSys trae los wikis de ayuda `csys_help` y `csys_admin_help`) no forman parte de la migración: si no tienen ninguna etiqueta solo se cuentan como información (`foreign_unlabelled_objects`, con el número por tipo y de proyectos); si tienen alguna, es fallo (`foreign_object_has_tags`). Un objeto de más en un proyecto que sí está en el origen sigue siendo diferencia (`object_coverage`). Desde el directorio que contiene `snapshots_gen/`, sustituye los nombres entre `<...>`:
 
 ```sh
 umask 077

@@ -312,6 +312,28 @@ class TagsComparisonTest < Minitest::Test
     assert_raises(TagsEvidence::InvalidEvidence) { compare }
   end
 
+  # Every new cosmoSys instance brings projects of its own (help wikis): they
+  # are not part of the migration. Unlabelled, they are only counted; with any
+  # tag they fail. An extra object in a project of the source still fails.
+  def test_unlabelled_objects_of_projects_outside_the_source_are_information
+    @target << { 'kind' => 'object', 'id' => 801, 'type' => 'WikiPage', 'project' => 'help-a', 'title' => 'Wiki', 'source_order' => nil }
+    @target << { 'kind' => 'object', 'id' => 802, 'type' => 'WikiPage', 'project' => 'help-b', 'title' => 'Start', 'source_order' => nil }
+    @target << { 'kind' => 'object', 'id' => 803, 'type' => 'Issue', 'project' => 'help-b', 'csid' => 'HELP-0001', 'source_order' => nil }
+    result = compare
+    assert_empty result.failures
+    assert_includes result.information, 'foreign_unlabelled_objects count=3 Issue=1 WikiPage=2 projects=2 (target projects that are not in the source)'
+
+    @target << of(@target, 'assignment').first.merge('id' => 900, 'taggable_type' => 'WikiPage', 'taggable_id' => 802)
+    result = rejects('foreign_object_has_tags')
+    assert result.failures.any? { |line| line.start_with?('assignment expected=0 actual=1') }
+  end
+
+  def test_an_extra_object_in_a_source_project_still_fails
+    @target << { 'kind' => 'object', 'id' => 801, 'type' => 'WikiPage', 'project' => 'demo', 'title' => 'Extra', 'source_order' => nil }
+    result = rejects('object_coverage')
+    refute result.information.any? { |line| line.start_with?('foreign_unlabelled_objects') }
+  end
+
   def test_same_csid_in_independent_projects_is_valid
     [@source, @target].each do |rows|
       objects = of(rows, 'object')

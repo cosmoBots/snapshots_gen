@@ -245,7 +245,7 @@ module TagsEvidence
       tags = index(document.tags, side, 'tag')
       index(document.assignments, side, 'assignment')
       objects = {}
-      logical_objects, catalog, assignments, dates = [], [], [], []
+      logical_objects, catalog, assignments, dates, foreign_objects = [], [], [], [], []
       physical_counts = Hash.new(0)
       logical_assignment_counts = Hash.new(0)
       document.objects.each do |row|
@@ -266,9 +266,14 @@ module TagsEvidence
         absorbed = side == 'source' && type == 'Issue' && @absorbed.key?(id)
         fail_at('report_absorbed_project_mismatch', side, row) if absorbed && @absorbed[id] != row['project']
         fail_at('invalid_object_identity', side, row) unless absorbed || (text?(row['project']) && text?(identifier))
-        objects[physical_key] = { key: logical_key, row: row, absorbed: absorbed }
+        # A new instance brings projects of its own (help wikis) that are
+        # not part of the migration: outside the coverage, but never tagged.
+        foreign = side == 'target' && !@source_projects.include?(row['project'])
+        objects[physical_key] = { key: logical_key, row: row, absorbed: absorbed, foreign: foreign }
         if absorbed
           @information << "absorbed_unlabelled_issue id=#{id} (report)"
+        elsif foreign
+          foreign_objects << row
         else
           logical_objects << logical_key
         end
@@ -308,6 +313,7 @@ module TagsEvidence
         end
         next unless object && tag
         fail_at('absorbed_issue_has_tags', side, row) if object[:absorbed]
+        fail_at('foreign_object_has_tags', side, row) if object[:foreign]
         next unless tag['name'].is_a?(String) || tag['name'].is_a?(Hash)
 
         name = byte_key(tag['name'])
@@ -317,6 +323,11 @@ module TagsEvidence
         logical_assignment_counts[key] += 1
         active = row['taggable_type'] == 'Issue' ? 'active_issue_tags' : 'active_wiki_tags'
         fail_at('tag_visibility_disabled', side, row) unless settings[active] == '1'
+      end
+      unless foreign_objects.empty?
+        types = %w[Issue WikiPage].map { |type| "#{type}=#{foreign_objects.count { |row| row['type'] == type }}" }
+        @information << "foreign_unlabelled_objects count=#{foreign_objects.length} #{types.join(' ')} " \
+                        "projects=#{foreign_objects.map { |row| row['project'] }.uniq.length} (target projects that are not in the source)"
       end
       logical_assignment_counts.each do |key, count|
         fail_at('duplicate_assignment_projection', side, nil, key) if count > 1
@@ -340,6 +351,7 @@ module TagsEvidence
       validate_schema(@source, 'source')
       validate_schema(@target, 'target')
       report_map
+      @source_projects = @source.objects.map { |row| row['project'] }.uniq
       source = inventory(@source, 'source')
       target = inventory(@target, 'target')
       difference('object_coverage', source[:objects], target[:objects])
