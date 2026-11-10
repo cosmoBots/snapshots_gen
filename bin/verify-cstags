@@ -1,0 +1,35 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Verifies a tags package (.cstags) against docs/cstags-format.md. With
+# history= and csys=, it also checks that the package belongs to exactly
+# those sibling packages. Exits 0 when it verifies and is importable, 1 when it
+# does not verify, and 3 when it verifies but the strict profile blocks it.
+
+require_relative '../converter/lib/snapshots_gen/tags_package'
+
+options = ARGV.drop(1).each_with_object({ 'csys' => [] }) do |argument, result|
+  key, value = argument.split('=', 2)
+  abort "usage: verify-cstags PACKAGE.cstags [history=PACKAGE.cshistory] [csys=PACKAGE.csys ...]" unless value && %w[history csys].include?(key)
+
+  key == 'csys' ? result['csys'] << value : result[key] = value
+end
+if ARGV.empty?
+  warn 'usage: verify-cstags PACKAGE.cstags [history=PACKAGE.cshistory] [csys=PACKAGE.csys ...]'
+  exit 2
+end
+
+csys = options['csys'].empty? ? nil : options['csys']
+result = SnapshotsGen::TagsPackage::Verifier.new(ARGV.first).verify(history: options['history'], csys: csys)
+unless result.ok?
+  result.errors.each { |error| warn "error: #{error}" }
+  warn "invalid: #{result.errors.length} errors"
+  exit 1
+end
+content = result.manifest.fetch('content')
+counts = content.fetch('counts')
+puts "valid: #{counts['source_tags']} tags, #{counts['source_taggings']} taggings, #{counts['objects']} objects, " \
+     "#{counts['blocking_anomalies']} blocking, #{counts['warning_anomalies']} warning and " \
+     "#{counts['information_anomalies']} information anomalies; importable: #{content['importable']}"
+puts 'dependencies: not checked (pass history= and csys= to check them)' unless options['history'] && csys
+exit(content['importable'] ? 0 : 3)

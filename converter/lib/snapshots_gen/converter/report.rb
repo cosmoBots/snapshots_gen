@@ -60,7 +60,12 @@ module SnapshotsGen
         'shared_version' => ['information', 'Versions shared with other projects, assigned by the history importer'],
         'source_gap' => ['warning', 'Gaps reported by the exporter'],
         'unsupported_content' => ['information', 'Content present in the source that this version does not migrate'],
-        'plugin_data_not_migrated' => ['warning', 'Tables of other plugins with data, not migrated']
+        'plugin_data_not_migrated' => ['warning', 'Tables of other plugins with data, not migrated'],
+        # Tags: one entry per anomaly code of the .cstags (subject = code), and
+        # the package counts. Never tag names (docs/cstags-format.md).
+        'tags_blocking' => ['blocking', 'Tags the strict profile cannot import: the .cstags is not importable'],
+        'tags_warning' => ['warning', 'Tag findings to review before delivery'],
+        'tags_information' => ['information', 'Tags package: counts and diagnostics']
       }.freeze
 
       attr_reader :entries

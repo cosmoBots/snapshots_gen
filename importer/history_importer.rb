@@ -534,9 +534,15 @@ module SnapshotsGen
           return drop_detail(detail, journal, "#{detail['value_ref']} #{missing} not found")
         end
 
+        # A tag list is literal text: a tag may be named like a placeholder.
+        literal = detail['value_ref'] || tag_list?(detail['property'], prop_key)
         { 'property' => detail['property'], 'prop_key' => prop_key,
-          'old_value' => detail['value_ref'] ? old_value : placeholders(old_value),
-          'value' => detail['value_ref'] ? value : placeholders(value) }
+          'old_value' => literal ? old_value : placeholders(old_value),
+          'value' => literal ? value : placeholders(value) }
+      end
+
+      def tag_list?(property, prop_key)
+        property == 'attr' && prop_key == 'tag_list'
       end
 
       def drop_detail(detail, journal, reason)
@@ -822,6 +828,8 @@ module SnapshotsGen
         relation_ids = details.where(property: 'relation').pluck(:old_value, :value).flatten.compact.map(&:to_i).uniq
         problems << 'relation details name missing items' unless (relation_ids - Issue.where(id: relation_ids).pluck(:id)).empty?
         leftovers = journals.where('notes LIKE ?', '%#snapshots-gen-item-%').count +
+                    details.where.not(property: 'attr', prop_key: 'tag_list')
+                           .where('old_value LIKE :mark OR value LIKE :mark', mark: '%#snapshots-gen-item-%').count +
                     Issue.where(id: @item_map.values).where('description LIKE ?', '%#snapshots-gen-item-%').count +
                     WikiContent.where(page_id: @page_map.values).where('text LIKE ?', '%#snapshots-gen-item-%').count
         problems << "#{leftovers} texts still hold reference placeholders" if leftovers.positive?

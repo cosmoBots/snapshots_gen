@@ -18,7 +18,10 @@ module SnapshotsGen
         'assigned_to_id' => 'users', 'author_id' => 'users', 'category_id' => 'categories',
         'fixed_version_id' => 'versions', 'project_id' => 'projects', 'parent_id' => 'items'
       }.freeze
-      ATTR_LITERALS = %w[subject description start_date due_date done_ratio estimated_hours is_private].freeze
+      # tag_list holds the old tag list as the plugin printed it (names joined
+      # by commas, quoted when a name has one). It is kept as an exact literal:
+      # never parsed, split or rewritten, so nil, commas and quotes survive.
+      ATTR_LITERALS = %w[subject description start_date due_date done_ratio estimated_hours is_private tag_list].freeze
 
       def initialize(plan, csys_packages:)
         @plan = plan
