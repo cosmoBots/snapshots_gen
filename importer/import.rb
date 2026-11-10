@@ -15,6 +15,7 @@
 #       verifies it, all in one transaction.
 
 require_relative 'history_importer'
+require_relative 'silence'
 
 module SnapshotsGen
   module Importer
@@ -32,21 +33,25 @@ module SnapshotsGen
       options['roles'] = options.fetch('roles', '').split(',').to_h { |pair| pair.split(':', 2) }
       raise ArgumentError, 'missing package path' if path.to_s.empty?
 
-      User.current = admin
-      case command
-      when 'prepare' then Package.open(path) { |package| Run.new(package, options).prepare! }
-      when 'csys' then import_csys(path, options)
-      when 'history'
-        summary = nil
-        Package.open(path) { |package| summary = Run.new(package, options).history! }
-        report = File.join(File.dirname(File.expand_path(path)), "history-import-#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}.json")
-        File.write(report, JSON.pretty_generate(summary) + "\n")
-        puts "Statistics: #{summary['stats'].map { |key, value| "#{key}=#{value}" }.join(', ')}"
-        print_dropped(summary, report)
-      else
+      unless %w[prepare csys history].include?(command)
         warn 'usage: import.rb prepare|history HISTORY.cshistory [options] | csys PACKAGE.csys [parent=IDENTIFIER] [confirm=yes]'
         exit 2
       end
+
+      User.current = admin
+      summary = report = nil
+      Silence.run do
+        case command
+        when 'prepare' then Package.open(path) { |package| Run.new(package, options).prepare! }
+        when 'csys' then import_csys(path, options)
+        when 'history'
+          Package.open(path) { |package| summary = Run.new(package, options).history! }
+          report = File.join(File.dirname(File.expand_path(path)), "history-import-#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}.json")
+          File.write(report, JSON.pretty_generate(summary) + "\n")
+          puts "Statistics: #{summary['stats'].map { |key, value| "#{key}=#{value}" }.join(', ')}"
+        end
+      end
+      print_dropped(summary, report) if summary
     rescue Error => error
       warn "error: #{error.message}"
       exit 1
@@ -71,9 +76,8 @@ module SnapshotsGen
     # The same attributes the interface sends (ProjectSnapshotsController),
     # keeping every source identifier.
     def import_csys(path, options)
-      # The materialization saves items through their models; nobody must be
-      # notified of a migration.
-      ActionMailer::Base.perform_deliveries = false
+      # The materialization saves items through their models: Silence keeps
+      # their notifications from being queued.
       Cosmosys::ProjectSnapshotPackageReader.open(path) do |source|
         content = source.manifest.fetch('content')
         primary = content.fetch('projects').find { |entry| entry.fetch('source_id') == content.fetch('primary_project_source_id') }

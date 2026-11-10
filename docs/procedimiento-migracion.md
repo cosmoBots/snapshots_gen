@@ -180,6 +180,8 @@ importar() { docker exec -u redmine -w /usr/src/redmine <contenedor-nuevo> bundl
 
 Son tres pasos, siempre en este orden.
 
+Ninguno avisa a nadie: mientras corren, el importador hace que Redmine no vea eventos que notificar y descarta cualquier correo antes de encolarlo, solo dentro de su propio proceso y sin cambiar ningún ajuste de la instancia. Cada orden termina diciendo `Jobs queued: none`; si dice `WARNING: jobs queued during the import`, nombra los trabajos que se encolaron.
+
 **6.1. Preparar:** crea los usuarios que falten, con su contraseña, los grupos, las definiciones de los campos personalizados que se conservan y las actividades de tiempo. Empareja por login los usuarios que ya existan. Repetirlo no duplica nada.
 
 ```sh
