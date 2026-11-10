@@ -77,6 +77,68 @@ El historial sigue a los campos: un cambio antiguo de `rqLevel` se ve como cambi
 
 **Personas:** los usuarios se emparejan por login. Si ya existían en la instancia nueva (como `admin`), conservan su contraseña y toman el nombre de origen. Si no, se crean con su contraseña de siempre. El asignado de cada ítem llega con el historial (paso 6.3), porque Redmine solo deja asignar a miembros del proyecto.
 
+## Material sensible
+
+Los ficheros que genera este procedimiento son una copia de la instancia y se tratan como una copia de seguridad de su base de datos. Llevan los correos de todos los usuarios y sus contraseñas cifradas: no van en claro, sino con el mismo esquema de Redmine 4.2 y 7 (SHA-1 con sal), pero una contraseña débil se puede sacar de su huella por fuerza bruta. Por eso no pueden quedarse en cualquier sitio ni viajar de cualquier forma.
+
+### Qué lleva cada fichero
+
+| Fichero | Se crea en | Qué lleva |
+| --- | --- | --- |
+| `migracion/inventario/inventory-*.json` | paso 1 | Recuentos, y los nombres de trackers, estados, campos personalizados, roles y plugins. Ni personas, ni correos, ni contenido. Es información interna de la organización: compártelo solo por un canal privado. |
+| `migracion/exportado/<nombre>-<fecha>.cslegacy` | paso 3 | Toda la base de la instancia antigua salvo las sesiones y los tokens: usuarios con su contraseña cifrada y su sal, correos, notas (también las privadas), wiki, consultas, preferencias, y los ficheros adjuntos. Los secretos del 2FA y las contraseñas de servicios van borrados. |
+| `migracion/historial-origen.jsonl`, `migracion/historial-destino.jsonl` | pasos 3 y 7 | El texto de todo el historial de cada ítem, notas privadas incluidas, con los valores completos. |
+| `migracion/etiquetas-origen.jsonl`, `migracion/etiquetas-destino.jsonl` | pasos 3 y 7 | Los nombres de todas las etiquetas, los proyectos y CSID de los ítems y los títulos de las páginas de wiki. |
+| `migracion/convertido/<nombre>-<identificador>.csys` | paso 4 | Todo el contenido de un proyecto raíz y de sus subproyectos: ítems, wiki, documentos y adjuntos. |
+| `migracion/convertido/<nombre>.cshistory` | paso 4 | Los usuarios con su contraseña cifrada, su sal y su correo, y todo el historial: notas (también las privadas), cambios, versiones de wiki, tiempo dedicado y observadores. |
+| `migracion/convertido/<nombre>.cstags` | paso 4 | Los nombres de las etiquetas, a qué ítems y páginas van, los ajustes del plugin y los permisos de etiquetas de cada rol. |
+| `migracion/convertido/report.md`, `report.json` | paso 4 | Logins (los que tienen 2FA o autenticación externa), asuntos de ítems, títulos de documentos, nombres de ficheros adjuntos, identificadores de proyecto y valores de campos. |
+| `migracion/importado/history-import-*.json`, `tags-import-*.json` | pasos 6.3 y 6.4 | Números y CSID de ítems y journals, nombres de roles, ajustes y recuentos. Se tratan igual que los demás. |
+| Lo que imprimen `--details`, `--show` y `--show-names` | paso 7 | Lo mismo que los ficheros que comparan. |
+| `/tmp/snapshots_gen-out` en el contenedor antiguo | pasos 1 a 3 | Copias de lo anterior. Se borra al final del paso 3. |
+| `/tmp/sg` en el contenedor nuevo | pasos 5 a 7 | Copias de los paquetes, de los informes y de los JSONL de destino. Se borra en el paso 8. |
+| El fichero de entorno de la instancia nueva (`COSMOSYS_ENV_FILE`) | paso 5 | La contraseña de su base de datos, su clave secreta y la contraseña inicial del administrador. Se conserva mientras viva la instancia, con modo 600 y fuera de cualquier repositorio. |
+| La copia de seguridad del deploy | paso 8.1 | Toda la base de la instancia nueva y sus adjuntos. |
+
+### Dónde se guardan
+
+- Solo en el directorio de trabajo de cada servidor (ver "Preparar el directorio de trabajo"), con `umask 077` en cada terminal: `migracion/` y sus directorios con modo 700 y los ficheros con 600. Nunca dentro de un checkout de git, en una carpeta sincronizada (una nube, Syncthing...) ni en un directorio con copias automáticas que no se vayan a borrar también. Mejor aún en un volumen cifrado.
+- Solo entra quien hace la migración. Ninguna copia en equipos personales.
+- Algunos ficheros salen de los contenedores legibles por otros usuarios. Después de cada `docker cp` hacia `migracion/` el procedimiento repite esta comprobación, que no tiene que imprimir nada:
+
+```sh
+chmod -R go-rwx migracion
+find migracion -perm /077
+```
+
+### Cómo se llevan de un servidor a otro
+
+- Directamente por SSH (`rsync -e ssh` o `scp`), o pasando por tu equipo con `scp -3`, que no guarda nada en él. Si no hay más remedio que un disco, que esté cifrado y se borre después.
+- Nunca por correo, chat, incidencias, enlaces públicos, servicios de intercambio de ficheros ni nubes sin cifrar.
+- Comprueba siempre con `sha256sum` que lo que llegó es lo que salió (paso 3.4).
+
+### Lo que no se hace nunca
+
+- Enviar a nadie un paquete, un informe de conversión o de importación, un JSONL de comparación o una copia de seguridad, ni adjuntarlos a una incidencia. `report.md` tampoco: lleva logins y asuntos.
+- Para pedir ayuda basta con el mensaje de error, el inventario (por un canal privado) y los títulos de `report.md` con sus recuentos, que no llevan personas ni contenido:
+
+```sh
+grep '^###' migracion/convertido/report.md
+```
+
+- Dejar copias en `/tmp` del servidor, en un directorio compartido o dentro de un contenedor después del paso que las usa.
+
+### Cuándo se borran
+
+En el paso 10, con una lista cerrada y una comprobación de que no queda nada. `rm` no garantiza que los datos desaparezcan del disco (discos SSD, instantáneas del sistema de ficheros, copias de seguridad del servidor), así que la protección de verdad es trabajar en un volumen cifrado y no dejar que el directorio de trabajo entre en otras copias.
+
+### Si un fichero acaba donde no debe
+
+1. Bórralo de ahí y de todo lo que lo haya copiado (papelera, carpetas sincronizadas, copias de seguridad, correos enviados y recibidos), y apunta qué fichero era, dónde estuvo, cuánto tiempo y quién pudo verlo.
+2. Avisa enseguida a quien lleve la protección de datos en tu organización: es una posible brecha de datos personales, que puede haber que notificar en plazo.
+3. Si era un `.cslegacy`, un `.cshistory` o una copia de seguridad, las contraseñas cifradas han quedado expuestas. Pide a todos los usuarios que cambien su contraseña en la instancia nueva (y en la antigua, si sigue en uso) y en cualquier otro servicio donde usaran la misma. Un administrador puede forzarlo en cada usuario con "Debe cambiar la contraseña en el próximo inicio de sesión".
+4. Si era el fichero de entorno de la instancia nueva, cambia los secretos que lleva: la contraseña del administrador, `REDMINE_SECRET_KEY_BASE` (cierra todas las sesiones) y la contraseña de la base de datos, en PostgreSQL y en el fichero.
+
 ## Versiones con las que se ha ensayado
 
 | Pieza | Versión ensayada |
@@ -405,9 +467,36 @@ Hasta el paso 8, volver atrás es simplemente no usar la instancia nueva: la ant
 
 Después del paso 8, lo que se haya hecho en la instancia nueva no vuelve a la antigua.
 
-## 10. Borrar los paquetes
+## 10. Borrar los ficheros de la migración
 
-Cuando la instancia nueva esté abierta y comprobada, borra `migracion/` y cualquier copia de los paquetes `.cslegacy`, `.cshistory`, `.csys` y `.cstags`: los dos primeros tienen las contraseñas cifradas y los correos de todos los usuarios, y todos llevan contenido de la instancia.
+Cuando la instancia nueva esté abierta y comprobada, borra todo lo que lista la tabla de "Material sensible", salvo el fichero de entorno de la instancia nueva (lo necesita mientras viva) y la copia de seguridad del paso 8.1, que se borra cuando pase el tiempo acordado para volver atrás (o pasa al régimen de copias de la instancia, con el mismo cuidado).
+
+En el servidor antiguo, desde el directorio de trabajo:
+
+```sh
+rm -rf migracion
+test ! -e migracion && echo "migracion borrado"
+```
+
+En el servidor nuevo, desde el directorio de trabajo:
+
+```sh
+rm -rf migracion
+test ! -e migracion && echo "migracion borrado"
+docker exec "$NUEVO" test ! -e /tmp/sg && echo "/tmp/sg borrado"
+```
+
+Los dos `echo` tienen que salir. El directorio `/tmp/snapshots_gen-*` del contenedor antiguo ya se borró y se comprobó en el paso 3.
+
+Busca después copias olvidadas en cada máquina por la que hayan pasado los ficheros (los dos servidores, el disco del traslado, tu equipo si los tuvo):
+
+```sh
+sudo find / \( -path /proc -o -path /sys \) -prune -o \( -name '*.cslegacy' -o -name '*.cshistory' -o -name '*.csys' -o -name '*.cstags' -o -name 'historial-*.jsonl' -o -name 'etiquetas-*.jsonl' -o -name 'history-import-*.json' -o -name 'tags-import-*.json' \) -print 2>/dev/null
+```
+
+No tiene que imprimir nada de esta migración. cosmoSys también exporta proyectos en ficheros `.csys`: si aparece alguno que no es de la migración, déjalo. La imagen `snapshots_gen-converter` y el checkout `snapshots_gen/` no llevan datos; se pueden borrar o conservar (`docker image rm snapshots_gen-converter`).
+
+`rm` no garantiza que los datos desaparezcan del disco: en discos SSD, en sistemas de ficheros con instantáneas y en las copias de seguridad del servidor pueden seguir ahí. La protección de verdad es la de "Material sensible": trabajar en un volumen cifrado y no dejar que el directorio de trabajo entre en otras copias.
 
 ## Si algo falla
 
