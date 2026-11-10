@@ -218,6 +218,8 @@ Si termina en `Dry run: everything was rolled back.`, impórtalo de verdad:
 importar history /tmp/sg/pkg/<nombre>.cshistory
 ```
 
+Al terminar de escribir el historial, y si la versión de cosmoSys las tiene, captura las líneas base de presentación de los ítems consolidados (por ejemplo, los requisitos que ya no están en borrador): son el texto aprobado con el que cosmoSys compara después, y sin ellas el ítem se lee "falta evidencia". La instancia antigua no las tenía, así que se toman del contenido migrado ya completo, como hace el script `scripts/capture_approved_presentation_baselines.rb` de cosmoSys con los ítems anteriores a esa función. Por eso el paso 6.2 no las captura, aunque la interfaz sí lo hace al importar un paquete: las referencias y relaciones entre paquetes no están completas hasta este paso.
+
 Todo ocurre en una sola transacción: o queda todo importado y verificado, o no queda nada. Al final dice cuántos journals, versiones de wiki, entradas de tiempo, observadores y membresías ha escrito, y deja un informe en `/tmp/sg/pkg/history-import-<fecha>.json` con lo que no pudo traducir. Lo que la conversión ya quitó está en su informe y no llega al importador, así que cualquier cosa que el importador descarte es algo que el informe de conversión no anunciaba: la última línea lo dice (`Dropped by the importer: none` o un `WARNING: the importer dropped N records that the conversion report does not announce`). En el JSON (formato `snapshots_gen-history-import-v1`), `dropped` lista cada registro con `kind`, `id` (en el origen) y `reason`, y los journals y cambios llevan además `journal` (el journal de origen), `item` y `csid` (el CSID del ítem en la instancia nueva); `dropped_counts` los cuenta por tipo. Cópialo:
 
 ```sh

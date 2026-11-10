@@ -126,6 +126,7 @@ module SnapshotsGen
           restore_projects!
           import_deferred_values!
           replace_description_placeholders!
+          capture_presentation_baselines!
           problems = verify!
           raise Error, "verification failed, nothing was written:\n#{problems.join("\n")}" if problems.any?
           raise ActiveRecord::Rollback if @options['dry_run']
@@ -766,6 +767,33 @@ module SnapshotsGen
         end
       end
 
+      # cosmoSys keeps, for each consolidated item (a requirement past draft),
+      # the text that was approved; without it the item reads "missing
+      # evidence". The old instance had none, so they are captured here, from
+      # the final text and relations, as cosmoSys's own
+      # scripts/capture_approved_presentation_baselines.rb does for items that
+      # predate them. The .csys import does not capture them on purpose
+      # (purpose :materialization): cross-package references and relations
+      # are only complete after this step.
+      def capture_presentation_baselines!
+        return unless defined?(Cosmosys::ApprovedPresentationBaseline)
+
+        attributes = Cosmosys::ApprovedPresentationBaseline::ATTRIBUTES
+        @baseline_items = []
+        Issue.where(id: @item_map.values).includes(:tracker, :status).find_each do |issue|
+          next unless issue.cosmosys_item_kind.approved_presentation_baseline == true &&
+                      issue.status&.cosmosys_maturity_level.to_i > Cosmosys::ApprovedPresentationBaseline::CONSOLIDATED_MATURITY_FLOOR
+
+          baselines = issue.cosmosys_presentation_baselines.where(attribute_name: attributes).to_a
+          next if baselines.map(&:attribute_name).sort == attributes.sort &&
+                  baselines.all? { |baseline| baseline.captured_maturity == issue.status.cosmosys_maturity_level }
+
+          Cosmosys::ApprovedPresentationBaseline.capture!(issue, user: User.current)
+          @baseline_items << issue
+        end
+        @stats['presentation_baselines'] = @baseline_items.length
+      end
+
       # --- verification ------------------------------------------------------
 
       def verify!
@@ -797,6 +825,13 @@ module SnapshotsGen
                     Issue.where(id: @item_map.values).where('description LIKE ?', '%#snapshots-gen-item-%').count +
                     WikiContent.where(page_id: @page_map.values).where('text LIKE ?', '%#snapshots-gen-item-%').count
         problems << "#{leftovers} texts still hold reference placeholders" if leftovers.positive?
+        unready = Array(@baseline_items).reject do |issue|
+          Cosmosys::ApprovedPresentationBaseline.inspect(issue.reload, user: User.current).status == :consistent
+        end
+        if unready.any?
+          say "WARNING: #{unready.length} consolidated items read \"missing evidence\" or \"inconsistent\" after capturing " \
+              "their presentation baselines: #{unready.first(20).map(&:csid).join(', ')}"
+        end
         labels, product_gaps = untranslated_history_labels(journals)
         problems << "history labels without translation: #{labels.join(', ')}" if labels.any?
         product_gaps.each do |key|

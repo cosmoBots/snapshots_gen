@@ -149,10 +149,14 @@ module SnapshotsGen
           return
         end
         options = {}
+        parameters = Cosmosys::ProjectSnapshotMaterializer.instance_method(:initialize).parameters.map(&:last)
         # cosmoSys versions that report progress take a callback.
-        if Cosmosys::ProjectSnapshotMaterializer.instance_method(:initialize).parameters.any? { |_type, name| name == :progress }
-          options[:progress] = progress_printer
-        end
+        options[:progress] = progress_printer if parameters.include?(:progress)
+        # Not :snapshot, as the interface: with :snapshot cosmoSys Requirements
+        # captures the approved presentation baselines here, before the
+        # history import completes cross-package references and relations.
+        # The history import captures them at its end.
+        options[:purpose] = :materialization if parameters.include?(:purpose)
         project = Cosmosys::ProjectSnapshotMaterializer.new(source, user: admin, attributes: attributes, **options).call
         tree = Project.find(project.id).self_and_descendants.pluck(:id)
         puts "Imported #{project.identifier}: #{tree.length} projects, #{Issue.where(project_id: tree).count} items."
