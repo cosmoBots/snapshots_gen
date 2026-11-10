@@ -29,7 +29,7 @@ docker run --rm -v "$PWD":/w -w /w ruby:2.7 \
   bash -c 'gem install rubyzip -v 2.3.2 && ruby test/legacy_snapshot_format_test.rb'
 docker build -t snapshots_gen-converter converter/
 docker run --rm -v "$PWD":/w -w /w snapshots_gen-converter \
-  bash -c 'for t in legacy_snapshot_format converter_rules converter_history converter_tags; do ruby test/${t}_test.rb || exit 1; done'
+  bash -c 'for t in legacy_snapshot_format converter_rules converter_history converter_tags exporter_inventory; do ruby test/${t}_test.rb || exit 1; done'
 ```
 
 To check a package:

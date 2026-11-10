@@ -431,9 +431,79 @@ module SnapshotsGen
         lines << "Users: #{users['count']} (#{users['by_status'].map { |status, count| "#{status}=#{count}" }.join(', ')}), " \
                  "#{users['admins']} admins, #{users['with_2fa']} with 2FA, #{users['with_auth_source']} external auth, " \
                  "#{users['groups']} groups; time entries: #{tables['time_entries']}, watchers: #{tables['watchers']}, members: #{tables['members']}"
+        lines << tags_summary(inventory.fetch('tags'))
         text = inventory.fetch('text')
         lines << "Ambiguous Markdown tables: #{text['ambiguous_markdown_tables']} in #{text['objects_with_ambiguous_markdown_tables']} texts"
         lines.join("\n")
+      end
+
+      # One line with the tag counts of the step 1 checklist: counts only,
+      # never a tag name.
+      def self.tags_summary(tags)
+        profile = tags['additional_tags_profile']
+        return 'Tags: no additional_tags and additional_taggings tables' unless profile
+
+        by_type = profile['taggings_by_type'].map { |type, count| "#{type}=#{count}" }.join(', ')
+        "Tags: #{profile['tags']} tags (#{profile['unused_tags']} unused), #{profile['taggings']} taggings (#{by_type.empty? ? 'none' : by_type}), " \
+          "#{profile['contexts'].nil? ? 'no context column' : "#{profile['contexts']} distinct contexts"}, " \
+          "#{profile['taggings_with_tagger']} with tagger; names with a comma: #{profile['names_with_comma']}, " \
+          "groups equal except for case: #{profile['case_variant_groups']}, scope conflicts on one object: #{profile['scope_conflicts']}, " \
+          "names with edge spaces: #{profile['names_with_edge_spaces']}; tag changes in the history: #{profile['tag_list_changes']}"
+      end
+
+      # The tag counts that matter for the migration (docs/procedimiento-migracion.md,
+      # step 1), from the rows of additional_tags (id, name), additional_taggings
+      # and the number of tag changes in the history (contexts is nil when the
+      # table has no context column). Pure, so it can be tested
+      # without a database.
+      def self.tag_profile(tags, taggings, tag_list_changes, context_column: true)
+        names = {}
+        tags.each { |row| names[row['id']] = text(row['name']) }
+        used = {}
+        taggings.each { |row| used[row['tag_id']] = true }
+        valid = names.values.compact
+        variants = valid.group_by(&:downcase).values.count { |group| group.uniq.length > 1 }
+        scoped = Hash.new { |hash, key| hash[key] = [] }
+        taggings.each do |row|
+          name = names[row['tag_id']]
+          group = scope_group(name)
+          scoped[[row['taggable_type'], row['taggable_id'], group]] << name if group
+        end
+        {
+          'tags' => tags.length,
+          'taggings' => taggings.length,
+          'taggings_by_type' => taggings.group_by { |row| row['taggable_type'].to_s }.transform_values(&:length).sort.to_h,
+          'contexts' => context_column ? taggings.map { |row| row['context'] }.uniq.length : nil,
+          'taggings_with_tagger' => taggings.count { |row| !row['tagger_id'].nil? || !row['tagger_type'].nil? },
+          'unused_tags' => tags.count { |row| !used.key?(row['id']) },
+          'names_with_comma' => valid.count { |name| name.include?(',') },
+          'case_variant_groups' => variants,
+          'scope_conflicts' => scoped.values.count { |group| group.uniq.length > 1 },
+          # The rule of the converter (and of the 4.6.0 model, which strips names).
+          'names_with_edge_spaces' => valid.count { |name| name.strip != name },
+          'tag_list_changes' => tag_list_changes
+        }
+      end
+
+      # A name as text, or nil when it is not valid UTF-8 (counted apart by
+      # the converter).
+      def self.text(value)
+        return nil if value.nil?
+
+        name = value.to_s.dup.force_encoding(Encoding::UTF_8)
+        name.valid_encoding? ? name : nil
+      end
+
+      # The group of a "group::value" name as AdditionalTag#group_name computes
+      # it in 4.6.0; the same rule as TagsPackage.scope_group of the converter,
+      # repeated here because the exporter runs alone in the old instance.
+      def self.scope_group(name)
+        return nil unless name.is_a?(String) && name.include?('::')
+
+        text = name.strip
+        scope = text.split('::').map(&:strip)
+        labels, separator = scope.length > 1 ? [scope, '::'] : [text.split(':').map(&:strip), ':']
+        labels.length > 2 ? labels[0...-1].join(separator) : labels.first
       end
 
       private
@@ -673,7 +743,16 @@ module SnapshotsGen
             result["#{table}_by_type"] = grouped_counts("SELECT taggable_type AS k, COUNT(*) AS c FROM #{@reader.quote_table(table)} GROUP BY taggable_type")
           end
         end
+        result['additional_tags_profile'] = tag_profile if @reader.table?('additional_tags') && @reader.table?('additional_taggings')
         result
+      end
+
+      def tag_profile
+        tags = @reader.rows('SELECT id, name FROM additional_tags')
+        columns = %w[tag_id taggable_type taggable_id tagger_id tagger_type context].select { |column| @reader.column?('additional_taggings', column) }
+        taggings = @reader.rows("SELECT #{columns.map { |column| @reader.quote_column(column) }.join(', ')} FROM additional_taggings")
+        changes = @reader.value("SELECT COUNT(*) FROM journal_details WHERE property = 'attr' AND prop_key = 'tag_list'").to_i
+        self.class.tag_profile(tags, taggings, changes, context_column: columns.include?('context'))
       end
 
       # Indented Markdown table headers turn into code blocks under CommonMark.
