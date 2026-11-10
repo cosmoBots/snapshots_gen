@@ -22,10 +22,7 @@ module SnapshotsGen
         'use_colors' => 1
       }.freeze
       BOOLEAN_SETTINGS = %w[active_issue_tags active_wiki_tags open_issues_only show_with_count].freeze
-      CHOICE_SETTINGS = {
-        'tags_sidebar' => %w[none list cloud simple_cloud], 'tags_sort_by' => %w[name count],
-        'tags_sort_order' => %w[asc desc], 'tags_suggestion_order' => %w[name last_created count]
-      }.freeze
+      CHOICE_SETTINGS = TagsPackage::CHOICE_SETTINGS
       # Destination key => old key whose value it takes, translated.
       MAPPED_SETTINGS = { 'tags_color_theme' => 'use_colors' }.freeze
       # Destination keys without an old equivalent: the destination default.
@@ -257,6 +254,13 @@ module SnapshotsGen
 
           anomaly('comma_in_name', 'tags', [row_id(row)], 'name has a comma')
         end
+        tags.each do |row|
+          problems = %w[created_at updated_at].filter_map do |key|
+            value = row[key]
+            "#{key}: #{value.nil? ? 'missing' : TagsPackage.timestamp_problem(value)}" if value.nil? || TagsPackage.timestamp_problem(value)
+          end
+          anomaly('invalid_timestamp', 'tags', [row_id(row)], problems.join('; ')) if problems.any?
+        end
         counts = taggings.group_by { |row| row['tag_id'] }.transform_values(&:length)
         TagsPackage.tags_by_id(tags).each do |id, row|
           real = counts.fetch(id, 0)
@@ -272,6 +276,9 @@ module SnapshotsGen
         by_id = TagsPackage.tags_by_id(tags)
         taggings.each do |row|
           id = [row_id(row)]
+          if !row['created_at'].nil? && (problem = TagsPackage.timestamp_problem(row['created_at']))
+            anomaly('invalid_timestamp', 'taggings', id, "created_at: #{problem}")
+          end
           anomaly('orphan_tag', 'taggings', id, row['tag_id'].nil? ? 'null tag_id' : 'tag_id names no unique tag') unless by_id.key?(row['tag_id'])
           unless row['context'] == TagsPackage::PROFILE['implicit_context']
             anomaly('unsupported_context', 'taggings', id, row['context'].nil? ? 'null context' : 'context other than "tags"')

@@ -5,6 +5,7 @@
 # It only depends on the legacy snapshot format (canonical JSON) and rubyzip,
 # so it runs under the converter's Ruby and inside the new instance.
 
+require 'date'
 require 'digest'
 require 'json'
 require 'set'
@@ -71,6 +72,14 @@ module SnapshotsGen
     SETTING_KEYS = %w[active_issue_tags active_wiki_tags open_issues_only show_tags_after_queries show_with_count
                       tags_color_theme tags_sidebar tags_sort_by tags_sort_order tags_suggestion_order].freeze
     CRITICAL_SETTINGS = %w[active_issue_tags active_wiki_tags].freeze
+    # The values each setting may hold in 4.6.0: switches are "0" or "1".
+    CHOICE_SETTINGS = {
+      'tags_sidebar' => %w[none list cloud simple_cloud], 'tags_sort_by' => %w[name count],
+      'tags_sort_order' => %w[asc desc], 'tags_suggestion_order' => %w[name last_created count]
+    }.freeze
+    SETTING_DOMAINS = SETTING_KEYS.to_h { |key| [key, CHOICE_SETTINGS.fetch(key, %w[0 1])] }.freeze
+    # Datetimes as the legacy snapshot writes them: UTC with microseconds.
+    TIMESTAMP = /\A(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{6})Z\z/.freeze
     SETTING_ENTRY_KEYS = %w[provenance source_key source_value value].freeze
     PROVENANCES = %w[stored default mapped destination_default unavailable].freeze
     SETTINGS_PROVENANCES = %w[stored plugin_defaults incomplete].freeze
@@ -105,6 +114,7 @@ module SnapshotsGen
       'scoped_tag_conflict' => ['warning', 'Objects with two tags of the same "group::" scope, which the new plugin rejects on edit'],
       'comma_in_name' => ['warning', 'Names with a comma: kept as one tag, but the new plugin splits them at the comma when the object is edited'],
       'unreadable_role_permissions' => ['warning', 'Roles whose permissions cannot be read: no tag permission is given for them'],
+      'invalid_timestamp' => ['blocking', 'Tag or tagging dates that are not a valid timestamp (or a missing tag date, which the destination requires)'],
       'counter_mismatch' => ['information', 'Tags whose stored taggings_count differs from their real count (recomputed on import)']
     }.freeze
     SEVERITIES = %w[blocking warning information].freeze
@@ -133,6 +143,28 @@ module SnapshotsGen
       return ['invalid_name', "longer than #{MAX_NAME_LENGTH} characters"] if text.length > MAX_NAME_LENGTH
 
       nil
+    end
+
+    # nil when value is a datetime of the format that exists in the calendar
+    # (no 31 February, no hour 24), or the reason it is not.
+    def timestamp_problem(value)
+      match = value.is_a?(String) && TIMESTAMP.match(value)
+      return 'not a UTC datetime with microseconds' unless match
+
+      year, month, day, hour, minute, second = match.captures.first(6).map(&:to_i)
+      return 'not a calendar date' unless Date.valid_date?(year, month, day)
+      return 'not a time of the day' unless hour < 24 && minute < 60 && second < 60
+
+      nil
+    end
+
+    # The Time of a valid timestamp; raises Error otherwise, never normalizes.
+    def parse_time(value)
+      problem = timestamp_problem(value)
+      raise Error, problem if problem
+
+      parts = TIMESTAMP.match(value).captures.map(&:to_i)
+      Time.utc(*parts.first(6), parts.last)
     end
 
     # Exact identity of a name inside the package: the string itself, or the
@@ -313,6 +345,7 @@ module SnapshotsGen
         check_rows(rows)
         check_counts(manifest.fetch('content'), rows)
         check_source(manifest.fetch('content').fetch('source'))
+        check_descriptors(manifest.fetch('content').fetch('source'), rows)
         check_profile(manifest.fetch('content'), rows) if manifest.dig('content', 'importable') == true
         check_dependencies(manifest.fetch('content').fetch('dependencies'), history, csys, rows.fetch('objects'))
         Result.new(@errors, manifest, @errors.empty? ? rows : nil)
@@ -562,8 +595,43 @@ module SnapshotsGen
           valid = entry.is_a?(Hash) && entry.keys.sort == SETTING_ENTRY_KEYS && PROVENANCES.include?(entry['provenance']) &&
                   (entry['value'].nil? || entry['value'].is_a?(String)) && (entry['value'].nil? == (entry['provenance'] == 'unavailable'))
           @errors << "setting #{key} is malformed" unless valid
+          next if !valid || entry['value'].nil? || SETTING_DOMAINS.fetch(key).include?(entry['value'])
+
+          @errors << "setting #{key} has a value outside its domain"
         end
         @errors << 'settings_provenance is unknown' unless SETTINGS_PROVENANCES.include?(source['settings_provenance'])
+      end
+
+      # The descriptors are the evidence of the source tables: one per present
+      # table, with as many rows as the package carries, and columns that
+      # differ from the known ones only with their missing_column or
+      # unknown_column anomaly.
+      def check_descriptors(source, rows)
+        present = source['tables_present']
+        descriptors = source['table_descriptors']
+        return unless present.is_a?(Hash) && descriptors.is_a?(Array)
+
+        names = descriptors.map { |entry| entry.is_a?(Hash) ? entry['name'] : nil }
+        unless names == present.select { |_name, ok| ok == true }.keys.sort
+          @errors << 'table_descriptors does not describe exactly the present tables'
+          return
+        end
+        codes = rows.fetch('anomalies').map { |row| row['code'] }
+        SOURCE_TABLES.each do |file, table|
+          entry = descriptors.find { |descriptor| descriptor['name'] == table }
+          unless entry
+            @errors << "#{FILES[file]} has rows of the absent table #{table}" if rows.fetch(file).any?
+            next
+          end
+          @errors << "#{table} declares #{entry['rows'].inspect} rows; the package has #{rows.fetch(file).length}" unless entry['rows'] == rows.fetch(file).length
+          columns = Array(entry['columns']).map { |column| column.is_a?(Hash) ? column['name'] : nil }
+          known = KNOWN_COLUMNS.fetch(table)
+          missing = known - columns
+          extra = columns - known
+          if (missing.any? && !codes.include?('missing_column')) || (extra.any? && !codes.include?('unknown_column'))
+            @errors << "#{table} has columns #{columns.inspect} without the anomaly that says so"
+          end
+        end
       end
 
       # An importable package must satisfy the strict profile row by row; this
@@ -586,6 +654,13 @@ module SnapshotsGen
         names = tags.map { |row| TagsPackage.name_key(row['name']) }
         problems << 'two tags share a name' unless names.uniq.length == names.length
         problems << 'a row has source_extra' if (tags + taggings).any? { |row| !row['source_extra'].empty? }
+        problems << 'a tag has no creation or update time' if tags.any? { |row| row['created_at'].nil? || row['updated_at'].nil? }
+        if tags.any? { |row| [row['created_at'], row['updated_at']].compact.any? { |value| TagsPackage.timestamp_problem(value) } }
+          problems << 'a tag has a date that is not a valid timestamp'
+        end
+        if taggings.any? { |row| !row['created_at'].nil? && TagsPackage.timestamp_problem(row['created_at']) }
+          problems << 'a tagging has a date that is not a valid timestamp'
+        end
         by_id = TagsPackage.tags_by_id(tags)
         taggings.each do |row|
           object = objects[row['object_id']]

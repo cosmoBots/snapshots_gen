@@ -280,6 +280,58 @@ class ConverterTagsTest < Minitest::Test
     end
   end
 
+  # R4 of the adversarial review: what the package says about its source,
+  # its settings and its dates is checked, not only digested.
+  def test_verifier_checks_descriptors_settings_and_dates
+    convert(tag_tables([tag(1, 'one', 1)], [tagging(1, 1, 'Issue', 1)])) do |package, _summary, _report, _path, history, csys|
+      Dir.mktmpdir('cstags-r4') do |tmp|
+        check = lambda do |label, expected, &mutate|
+          rows = Marshal.load(Marshal.dump(package.rows))
+          content = Marshal.load(Marshal.dump(package.content.reject { |key, _value| %w[profile files counts].include?(key) }))
+          mutate.call(rows, content)
+          path = File.join(tmp, "#{label}.cstags")
+          TP.write(path, content: content, rows: rows)
+          errors = TP::Verifier.new(path).verify(history: history, csys: csys).errors
+          assert(errors.any? { |error| error.include?(expected) }, "#{label}: #{errors.inspect}")
+        end
+        descriptor = ->(content, name) { content['source']['table_descriptors'].find { |entry| entry['name'] == name } }
+        check.call('columns', 'without the anomaly that says so') do |_rows, content|
+          columns = descriptor.call(content, 'additional_taggings')['columns']
+          columns.reject! { |column| column['name'] == 'context' }
+          columns << { 'name' => 'owner_extra', 'type' => 'integer', 'sql_type' => 'int', 'null' => true }
+        end
+        check.call('rows', 'additional_tags declares 2 rows') { |_rows, content| descriptor.call(content, 'additional_tags')['rows'] += 1 }
+        check.call('descriptor', 'table_descriptors does not describe exactly the present tables') do |_rows, content|
+          content['source']['table_descriptors'].pop
+        end
+        check.call('setting', 'setting tags_sidebar has a value outside its domain') do |_rows, content|
+          content['source']['settings']['tags_sidebar']['value'] = 'sideways'
+        end
+        check.call('switch', 'setting show_with_count has a value outside its domain') do |_rows, content|
+          content['source']['settings']['show_with_count']['value'] = 'yes'
+        end
+        check.call('calendar', 'a tag has a date that is not a valid timestamp') do |rows, _content|
+          rows['tags'].first['created_at'] = '2021-02-31T05:06:07.000000Z'
+        end
+        check.call('format', 'a tagging has a date that is not a valid timestamp') do |rows, _content|
+          rows['taggings'].first['created_at'] = '2021-03-04T05:06:07Z'
+        end
+        check.call('null', 'a tag has no creation or update time') { |rows, _content| rows['tags'].first['updated_at'] = nil }
+      end
+    end
+    # A source date the destination cannot hold is a blocking anomaly of the conversion.
+    bad = tag(1, 'one', 1).merge('created_at' => '2021-02-31T05:06:07.000000Z')
+    convert(tag_tables([bad, tag(2, 'two', 0).merge('updated_at' => nil)], [tagging(1, 1, 'Issue', 1).merge('created_at' => '2021-04-31T00:00:00.000000Z')])) do |package|
+      assert_equal %w[invalid_timestamp], blocking(package)
+      assert_equal [['taggings', 1], ['tags', 1], ['tags', 2]], package.rows.fetch('anomalies').select { |row| row['code'] == 'invalid_timestamp' }
+                                                                    .map { |row| [row['table'], row['source_ids'].first] }
+    end
+    assert_nil TP.timestamp_problem('2024-02-29T23:59:59.999999Z')
+    %w[2023-02-29T00:00:00.000000Z 2021-13-01T00:00:00.000000Z 2021-01-01T24:00:00.000000Z 2021-01-01 x].each do |value|
+      assert TP.timestamp_problem(value), value
+    end
+  end
+
   def test_verifier_rejects_forged_roles
     convert(tag_tables([tag(1, 'one', 1)], [tagging(1, 1, 'Issue', 1)])) do |package|
       Dir.mktmpdir('cstags-roles') do |tmp|

@@ -176,11 +176,12 @@ module SnapshotsGen
         raise Error, error.message
       end
 
+      # Strict: an impossible date is refused, never normalized to another day.
       def timestamp(value, label, required)
         return nil if value.nil? && !required
 
-        Time.iso8601(value)
-      rescue ArgumentError, TypeError
+        TagsPackage.parse_time(value)
+      rescue TagsPackage::Error
         raise Error, "#{label} is not a timestamp the destination can hold"
       end
 
