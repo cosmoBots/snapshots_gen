@@ -247,7 +247,9 @@ module SnapshotsGen
 
       # The .csys import creates each container's attachments in this order,
       # so (container, ordinal) finds them again in the new instance.
-      def attachments
+      def attachment_containers
+        return @attachment_containers if @attachment_containers
+
         containers = {}
         @plan.items.each_value do |item|
           next if item.synthetic?
@@ -260,6 +262,11 @@ module SnapshotsGen
         table('wiki_pages').each do |page|
           @plan.attachments_of('WikiPage', page['id']).each_with_index { |id, index| containers[id] = ['wiki_page', page['id'], index] }
         end
+        @attachment_containers = containers
+      end
+
+      def attachments
+        containers = attachment_containers
         table('attachments').map do |row|
           container = containers[row['id']]
           index = @source.asset_index[row['id']] || {}
@@ -340,7 +347,7 @@ module SnapshotsGen
         when 'cf'
           translate_custom_field_detail(item, detail, base)
         when 'attachment'
-          base.merge('prop_ref' => 'attachments')
+          translate_attachment(item, journal, detail, base)
         when 'relation'
           other = (detail['value'] || detail['old_value']).to_i
           if @plan.absorbed.key?(other)
@@ -385,6 +392,29 @@ module SnapshotsGen
         @plan.kept_fields[field['id']] ||= field
         reference = { 'user' => 'users', 'version' => 'versions' }[field['field_format']]
         base.merge('prop_ref' => 'custom_fields', 'prop_key' => field['id'].to_s, 'value_ref' => reference)
+      end
+
+      # An attachment change keeps its attachment only when that attachment
+      # reaches the new instance with this same item. Otherwise (deleted from
+      # the old instance, its file missing, or migrated with another
+      # container) its old id would name another file, or none, in the new
+      # instance. Redmine 4.2 and 7 show a change whose attachment the item no
+      # longer has as the bare file name, without a link, so the change keeps
+      # its file names and takes id 0, which no attachment has: it shows the
+      # same as in the old instance. Every case is reported, and the importer
+      # writes exactly this.
+      def translate_attachment(item, journal, detail, base)
+        id = Integer(detail['prop_key'].to_s, exception: false)
+        container = id && attachment_containers[id]
+        return base.merge('prop_ref' => 'attachments') if container && container[0] == 'item' && container[1] == item.key
+
+        @attachment_ids ||= table('attachments').map { |row| row['id'] }.to_set
+        reason = id && @attachment_ids.include?(id) ? 'not migrated with this item' : 'deleted from the source'
+        missing = { 'old_value' => 'old', 'value' => 'new' }.reject { |column, _side| detail[column].to_s.empty? }.values
+        @report.add('history_attachment_cleared', "detail ##{detail['id']}",
+                    item: item.key, csid: item.csid, journal: journal['id'], attachment: detail['prop_key'].to_s,
+                    missing: missing, reason: reason, old_value: detail['old_value'], value: detail['value'])
+        base.merge('prop_key' => '0')
       end
 
       def drop(detail, item, reason)

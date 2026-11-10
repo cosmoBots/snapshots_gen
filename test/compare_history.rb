@@ -252,6 +252,27 @@ module HistoryComparison
       end
     end
 
+    # HistoryBuilder#translate_attachment: an attachment the item no longer
+    # has (deleted from the source, or migrated with another container) is
+    # written with id 0 and reported with every identifier. The reason must
+    # agree with the source: a deleted attachment is missing there, one not
+    # migrated with this item still exists.
+    def attachment_evidence(old, detail, journal_id)
+      return nil unless detail['property'] == 'attachment'
+
+      field = detail['field']
+      deleted = field == { 'missing_attachment' => detail['prop_key'] }
+      present = field.is_a?(Hash) && field.key?('filename')
+      sides = { 'old_value' => 'old', 'value' => 'new' }.reject { |column, _side| detail[column].to_s.empty? }.values
+      entry('history_attachment_cleared') do |e|
+        d = e.fetch('detail', {})
+        e['subject'] == "detail ##{detail['id']}" && d['item'] == "item:#{old['id']}" && d['journal'] == journal_id &&
+          d['attachment'] == detail['prop_key'] && d['old_value'] == detail['old_value'] && d['value'] == detail['value'] &&
+          d['missing'] == sides &&
+          ((d['reason'] == 'deleted from the source' && deleted) || (d['reason'] == 'not migrated with this item' && present))
+      end
+    end
+
     def dropped_detail(old, detail, journal_id)
       regular = entry('history_detail_dropped') do |e|
         e['subject'] == "detail ##{detail['id']}" && e.dig('detail', 'item') == "item:#{old['id']}" && !e.dig('detail', 'reason').to_s.empty?
@@ -270,9 +291,14 @@ module HistoryComparison
       [detail['property'], detail['field'], custom_definition, detail['old_value'], detail['value'], detail['old_ref'], detail['value_ref']]
     end
 
-    def expected_detail(detail, new, cleared = nil)
+    def expected_detail(detail, new, cleared = nil, attachment = nil)
       result = detail.dup
       reasons = []
+      if attachment
+        result['prop_key'] = '0'
+        result['field'] = { 'missing_attachment' => '0' }
+        reasons << 'history_attachment_cleared [report.json; HistoryBuilder#translate_attachment]'
+      end
       if cleared
         cleared['detail']['missing'].each do |side|
           result[side == 'old' ? 'old_value' : 'value'] = nil
@@ -341,7 +367,8 @@ module HistoryComparison
           next
         end
         cleared = reference_evidence(old, detail, before['id'], 'history_reference_cleared')
-        expected, reasons = expected_detail(detail, new, cleared)
+        attachment = attachment_evidence(old, detail, before['id'])
+        expected, reasons = expected_detail(detail, new, cleared, attachment)
         index = remaining.index { |candidate| signature(actual_detail(candidate)) == signature(expected) }
         unless index
           @failures << "#{where} detail ##{detail['id']}: missing or changed #{detail['property']}/#{detail['field']}"

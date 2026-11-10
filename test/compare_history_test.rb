@@ -515,6 +515,59 @@ class CompareHistoryTest < Minitest::Test
     refute compare(source, target, proof).ok?
   end
 
+  def attachment_detail(prop_key, field, old, value, id: 1)
+    detail(field, old, value, id: id, property: 'attachment', key: prop_key, label: 'Fichero',
+                                rendered: [value ? "Añadido Fichero #{value}" : "Fichero eliminado (#{old})"])
+  end
+
+  def attachment_report(**overrides)
+    report('history_attachment_cleared', 'detail #1',
+           **{ item: 'item:1', csid: 'DEMO-0001', journal: 1, attachment: '9', missing: ['old'],
+               reason: 'deleted from the source', old_value: 'gone.txt', value: nil }.merge(overrides))
+  end
+
+  def test_attachment_cleared_needs_the_exact_report_entry_and_id_zero_in_the_target
+    before = attachment_detail('9', { 'missing_attachment' => '9' }, 'gone.txt', nil)
+    after = attachment_detail('0', { 'missing_attachment' => '0' }, 'gone.txt', nil, id: 7)
+    proof = attachment_report
+    result = compare_detail(before, after, proof)
+    assert result.ok?, (result.failures + result.unexplained).inspect
+    assert_equal 1, result.explained.keys.count { |reason| reason.start_with?('history_attachment_cleared') }
+
+    refute compare_detail(before, after).ok?, 'without the report entry'
+    { item: 'item:2', journal: 2, attachment: '8', missing: ['new'], old_value: 'other.txt', value: 'gone.txt',
+      reason: 'not migrated with this item' }.each do |key, wrong|
+      refute compare_detail(before, after, attachment_report(key => wrong)).ok?, key
+    end
+    wrong_subject = attachment_report
+    wrong_subject['entries'][0]['subject'] = 'detail #2'
+    refute compare_detail(before, after, wrong_subject).ok?, 'other detail'
+
+    # The target must say 0 and keep the file name and the rendering.
+    other = attachment_detail('5', { 'filename' => 'gone.txt', 'size' => 3, 'created' => nil }, 'gone.txt', nil, id: 7)
+    refute compare_detail(before, other, proof).ok?, 'target names a real attachment'
+    renamed = attachment_detail('0', { 'missing_attachment' => '0' }, 'renamed.txt', nil, id: 7)
+    refute compare_detail(before, renamed, proof).ok?, 'file name changed'
+    rendered = attachment_detail('0', { 'missing_attachment' => '0' }, 'gone.txt', nil, id: 7)
+    rendered['rendered'] = ['Fichero eliminado (otro)']
+    refute compare_detail(before, rendered, proof).ok?, 'rendering changed'
+  end
+
+  def test_attachment_not_migrated_with_its_item_needs_that_reason
+    present = { 'filename' => 'other.txt', 'size' => 3, 'created' => '2020-01-01T00:00:00.000000Z' }
+    before = attachment_detail('8', present, nil, 'other.txt')
+    after = attachment_detail('0', { 'missing_attachment' => '0' }, nil, 'other.txt', id: 7)
+    proof = attachment_report(attachment: '8', missing: ['new'], reason: 'not migrated with this item',
+                              old_value: nil, value: 'other.txt')
+    assert compare_detail(before, after, proof).ok?
+    refute compare_detail(before, after, attachment_report(attachment: '8', missing: ['new'], old_value: nil,
+                                                           value: 'other.txt')).ok?, 'deleted, but it exists'
+    # A deleted attachment cannot be explained as not migrated either.
+    gone = attachment_detail('9', { 'missing_attachment' => '9' }, 'gone.txt', nil)
+    refute compare_detail(gone, attachment_detail('0', { 'missing_attachment' => '0' }, 'gone.txt', nil, id: 7),
+                          attachment_report(reason: 'not migrated with this item')).ok?
+  end
+
   def test_data_section_is_tied_to_a_project_with_reported_variables
     source, target, section = item, item(101), item(102, 'DEMO-0002')
     section.merge!('tracker' => 'csData', 'subject' => 'Project data', 'parent_id' => nil)

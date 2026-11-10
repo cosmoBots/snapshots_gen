@@ -40,7 +40,8 @@ module ConverterSnapshotHelper
     }
   end
 
-  def legacy(directory, tables)
+  # attachment_files: ids of attachment rows whose file the package carries.
+  def legacy(directory, tables, attachment_files: [])
     writer = LS::Writer.new(directory)
     tables.each do |name, rows|
       names = rows.flat_map(&:keys).uniq
@@ -58,6 +59,14 @@ module ConverterSnapshotHelper
         rows.each { |row| emit.call(row) }
       end
     end
+    unless attachment_files.empty?
+      blob = File.join(directory, '..', 'blob')
+      File.binwrite(blob, 'abc')
+      writer.write_asset_index(attachment_files.map do |id|
+        digest, bytes = writer.add_asset(blob)
+        { 'attachment_id' => id, 'sha256' => digest, 'bytes' => bytes, 'status' => 'present' }
+      end)
+    end
     writer.write_report_rows('redactions', [])
     writer.write_report_document('inventory', { 'plugins' => [] })
     writer.finish!(captured_at: TIME, generator: { 'name' => 'test', 'version' => '0' },
@@ -67,9 +76,9 @@ module ConverterSnapshotHelper
   end
 
   # Yields the history entities, the report and the plan of a conversion.
-  def convert(tables)
+  def convert(tables, attachment_files: [])
     Dir.mktmpdir('converter-snapshot') do |tmp|
-      Converter::Source.open(legacy(File.join(tmp, 'legacy'), tables)) do |source|
+      Converter::Source.open(legacy(File.join(tmp, 'legacy'), tables, attachment_files: attachment_files)) do |source|
         report = Converter::Report.new
         plan = Converter::Plan.new(source, report).build!
         entities = Converter::HistoryBuilder.new(plan, csys_packages: []).entities

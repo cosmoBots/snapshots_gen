@@ -530,7 +530,10 @@ module SnapshotsGen
         prop_key = detail['prop_key'].to_s
         case detail['prop_ref']
         when 'attachments'
-          prop_key = @attachment_map[prop_key.to_i]&.to_s || '0'
+          # The converter already wrote id 0 (and reported it) for every
+          # attachment the item no longer has; anything else must be found.
+          prop_key = @attachment_map[prop_key.to_i]&.to_s
+          return drop_detail(detail, journal, "attachment #{detail['prop_key']} not migrated") unless prop_key
         when 'custom_fields'
           prop_key = @field_map[prop_key.to_i]&.to_s
           return drop_detail(detail, journal, 'custom field not created') unless prop_key
