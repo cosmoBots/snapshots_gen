@@ -8,6 +8,7 @@
 require 'digest'
 require 'json'
 require 'set'
+require 'yaml'
 require 'zip'
 require_relative '../../../exporter/legacy_snapshot_format'
 
@@ -20,6 +21,7 @@ module SnapshotsGen
       'tags' => 'tables/tags.jsonl',
       'taggings' => 'tables/taggings.jsonl',
       'objects' => 'tables/objects.jsonl',
+      'roles' => 'tables/roles.jsonl',
       'anomalies' => 'reports/anomalies.jsonl'
     }.freeze
     # The only profile of version 1. Every field is part of the meaning of the
@@ -36,14 +38,15 @@ module SnapshotsGen
       'tags' => %w[created_at id name ordinal source_extra source_taggings_count updated_at],
       'taggings' => %w[context created_at id object_id ordinal source_extra tag_id taggable_id taggable_type tagger_id tagger_type],
       'objects' => %w[id source_id source_order source_type target untargeted_reason],
+      'roles' => %w[builtin id name ordinal tag_permissions],
       'anomalies' => %w[code id reason severity source_ids table]
     }.freeze
     CONTENT_KEYS = %w[captured_at counts dependencies files generator importable profile source].freeze
     SOURCE_KEYS = %w[legacy_snapshot_sha256 plugins settings settings_provenance table_descriptors tables_present].freeze
     DEPENDENCY_KEYS = %w[csys_packages history_content_sha256 history_sha256].freeze
     COUNT_KEYS = %w[blocking_anomalies distinct_contexts duplicate_projection_groups information_anomalies issue_objects
-                    non_null_taggers objects source_taggings source_tags tagged_objects unsupported_objects unused_tags
-                    warning_anomalies wiki_objects].freeze
+                    non_null_taggers objects roles_with_tag_permissions source_roles source_taggings source_tags
+                    tagged_objects unsupported_objects unused_tags warning_anomalies wiki_objects].freeze
     SOURCE_TABLES = { 'tags' => 'additional_tags', 'taggings' => 'additional_taggings' }.freeze
     # Columns of the old plugin (fork 1.0.4) that the rows carry by name.
     # Any other column goes to source_extra and blocks the import.
@@ -52,6 +55,12 @@ module SnapshotsGen
       'additional_taggings' => %w[id tag_id taggable_id taggable_type tagger_id tagger_type context created_at]
     }.freeze
     TAGGABLE_TYPES = %w[Issue WikiPage].freeze
+    # The tag permissions of a role: the same names in the fork 1.0.4 and in
+    # 4.6.0 (init.rb of both). The package carries which of them each source
+    # role had, so the importer can give them to the destination roles.
+    TAG_PERMISSIONS = %w[add_wiki_tags create_issue_tags edit_issue_tags view_issue_tags].freeze
+    # Role.builtin in Redmine: 0 a role given to members, 1 Non member, 2 Anonymous.
+    BUILTIN_ROLES = { 1 => 'non_member', 2 => 'anonymous' }.freeze
     LIST_SEPARATOR = ','
     MAX_NAME_LENGTH = 255
     SCOPE_SEPARATOR = '::'
@@ -93,10 +102,11 @@ module SnapshotsGen
       'case_variant_names' => ['warning', 'Names equal except for case: kept apart, but the new tag API matches them as one'],
       'scoped_tag_conflict' => ['warning', 'Objects with two tags of the same "group::" scope, which the new plugin rejects on edit'],
       'comma_in_name' => ['warning', 'Names with a comma: kept as one tag, but the new plugin splits them at the comma when the object is edited'],
+      'unreadable_role_permissions' => ['warning', 'Roles whose permissions cannot be read: no tag permission is given for them'],
       'counter_mismatch' => ['information', 'Tags whose stored taggings_count differs from their real count (recomputed on import)']
     }.freeze
     SEVERITIES = %w[blocking warning information].freeze
-    ANOMALY_TABLES = %w[tags taggings objects settings].freeze
+    ANOMALY_TABLES = %w[tags taggings objects roles settings].freeze
 
     MAX_ENTRY_BYTES = 1 << 30
 
@@ -165,10 +175,33 @@ module SnapshotsGen
       end.values.select { |rows| rows.length > 1 }
     end
 
+    # The tag permissions of a role from the YAML that Redmine stores in
+    # roles.permissions (a list of symbols), or nil when it cannot be read.
+    # It walks the YAML tree and never builds Ruby objects from it: only a
+    # plain list of plain scalars is accepted.
+    def tag_permissions(raw)
+      return [] if raw.nil?
+      return nil unless raw.is_a?(String) && raw.dup.force_encoding(Encoding::UTF_8).valid_encoding?
+
+      document = Psych.parse(raw.dup.force_encoding(Encoding::UTF_8))
+      # An empty value or a YAML null: a role without permissions.
+      return [] if !document || (document.root.is_a?(Psych::Nodes::Scalar) && document.root.tag.nil? &&
+                                 ['', '~', 'null'].include?(document.root.value))
+
+      list = document.root
+      return nil unless list.is_a?(Psych::Nodes::Sequence) && list.tag.nil?
+      return nil unless list.children.all? { |node| node.is_a?(Psych::Nodes::Scalar) && node.tag.nil? }
+
+      (list.children.map { |node| node.value.delete_prefix(':') } & TAG_PERMISSIONS).sort
+    rescue Psych::Exception
+      nil
+    end
+
     def counts(rows)
       tags = rows.fetch('tags')
       taggings = rows.fetch('taggings')
       objects = rows.fetch('objects')
+      roles = rows.fetch('roles')
       anomalies = rows.fetch('anomalies')
       used = taggings.map { |row| row['tag_id'] }.to_set
       severity = anomalies.group_by { |row| row['severity'] }.transform_values(&:length)
@@ -184,6 +217,8 @@ module SnapshotsGen
         'distinct_contexts' => taggings.map { |row| row['context'] }.uniq.length,
         'non_null_taggers' => taggings.count { |row| !row['tagger_id'].nil? || !row['tagger_type'].nil? },
         'duplicate_projection_groups' => projection_groups(tags, taggings).length,
+        'source_roles' => roles.length,
+        'roles_with_tag_permissions' => roles.count { |row| row['tag_permissions'].is_a?(Array) && row['tag_permissions'].any? },
         'blocking_anomalies' => severity.fetch('blocking', 0),
         'warning_anomalies' => severity.fetch('warning', 0),
         'information_anomalies' => severity.fetch('information', 0)
@@ -413,12 +448,15 @@ module SnapshotsGen
       end
 
       def check_rows(rows)
-        %w[tags taggings].each do |name|
+        %w[tags taggings roles].each do |name|
           rows.fetch(name).each_with_index do |row, index|
             @errors << "#{FILES[name]}:#{index + 1} has ordinal #{row['ordinal'].inspect}" unless row['ordinal'] == index + 1
+            next if name == 'roles'
+
             @errors << "#{FILES[name]}:#{index + 1} has a source_extra that is not an object" unless row['source_extra'].is_a?(Hash)
           end
         end
+        rows.fetch('roles').each_with_index { |row, index| check_role(row, "#{FILES['roles']}:#{index + 1}") }
         objects = rows.fetch('objects')
         ids = objects.map { |row| row['id'] }
         @errors << 'objects repeat an id' unless ids.uniq.length == ids.length
@@ -440,6 +478,14 @@ module SnapshotsGen
         end
         sorted = anomalies.sort_by { |row| TagsPackage.anomaly_sort_key(row) }
         @errors << 'anomalies are out of order' unless anomalies.map { |row| row['id'] } == sorted.map { |row| row['id'] }
+      end
+
+      def check_role(row, location)
+        @errors << "#{location} has a builtin that is not an integer" unless row['builtin'].nil? || row['builtin'].is_a?(Integer)
+        permissions = row['tag_permissions']
+        valid = permissions.nil? || (permissions.is_a?(Array) && permissions == permissions.uniq.sort &&
+                                     permissions.all? { |permission| TAG_PERMISSIONS.include?(permission) })
+        @errors << "#{location} has tag_permissions that are not a sorted list of tag permissions" unless valid
       end
 
       def check_object(row)

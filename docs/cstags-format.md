@@ -18,6 +18,7 @@ This document is the contract between the converter and the tags importer. `conv
 - **Names are exact.** A name is the exact sequence of characters the source stored: no strip, no case change, no Unicode normalization, no transliteration, no truncation and no split at commas. `A,B` is one tag; `A` and `a` are two; `café` written with one code point and with two are two.
 - **Nothing is decided in silence.** Whatever the destination cannot hold exactly is an anomaly with a code. A blocking anomaly makes the package not importable. The converter does not repair, merge, rename or reassign anything.
 - **Identities are logical.** Objects are named by what the new instance can find: an item by its project and final CSID, a wiki page by its project and title. Source ids are only evidence.
+- **Who could see them.** Every source role is listed with the tag permissions it had, so the importer can give the same permissions to the roles the history import maps them to.
 
 ## The strict profile
 
@@ -47,6 +48,7 @@ manifest.json
 tables/tags.jsonl
 tables/taggings.jsonl
 tables/objects.jsonl
+tables/roles.jsonl
 reports/anomalies.jsonl
 ```
 
@@ -134,6 +136,7 @@ All of them are recomputed by the verifier from the rows and must match.
 | `distinct_contexts` | Distinct `context` values of the taggings, `null` included as a value of its own. A statistic: the rows keep each value. |
 | `non_null_taggers` | Taggings with `tagger_id` or `tagger_type` set. |
 | `duplicate_projection_groups` | Groups of taggings with the same `object_id` and the same exact tag name (or the same unknown `tag_id`). |
+| `source_roles`, `roles_with_tag_permissions` | Rows of `roles.jsonl`, and those whose `tag_permissions` is a non-empty list. |
 | `blocking_anomalies`, `warning_anomalies`, `information_anomalies` | Anomalies by severity. |
 
 ## Rows
@@ -187,14 +190,29 @@ Wiki page target: `{"project_identifier", "title", "type": "WikiPage"}` with the
 
 Two objects with the same target ignoring case (the way Redmine finds wiki pages and the history importer finds CSIDs) are reported: `ambiguous_object` (blocking) when one of them is tagged, `ambiguous_untagged_object` (warning) otherwise.
 
+### tables/roles.jsonl
+
+One line per row of the source `roles` table, in the legacy snapshot's order (by `id`), with or without tag permissions; empty when the snapshot has no `roles` table.
+
+| Key | Meaning |
+| --- | --- |
+| `ordinal` | Position of the row in the source table, from 1. |
+| `id`, `name` | The source id and name, as stored (`name` as `{"$base64": ...}` when it was not valid UTF-8). |
+| `builtin` | `0` for a role given to members, `1` for the built-in Non member role, `2` for Anonymous, as Redmine stores it; `null` when it is not an integer. |
+| `tag_permissions` | The tag permissions the role had, sorted: a subset of `add_wiki_tags`, `create_issue_tags`, `edit_issue_tags` and `view_issue_tags` (the same names in the old fork and in 4.6.0). `[]` when it had none, `null` when its permissions could not be read. |
+
+Redmine stores `roles.permissions` as a YAML list of symbols. The converter reads it as a YAML tree and never builds Ruby objects from it: only a plain list of plain or quoted scalars is accepted, with the leading `:` of a symbol removed. A tagged value (`!ruby/...`), a map or anything else is unreadable: `tag_permissions` is `null` and there is an `unreadable_role_permissions` warning. Only the four tag permissions are carried; the other permissions of the role are not part of this package.
+
+Example: `{"builtin":0,"id":4,"name":"Reader","ordinal":4,"tag_permissions":["view_issue_tags"]}`
+
 ### reports/anomalies.jsonl
 
 | Key | Meaning |
 | --- | --- |
 | `id` | 1, 2, ... in file order. |
 | `code`, `severity` | The code and its fixed severity (table below). |
-| `table` | `tags`, `taggings`, `objects` or `settings`. |
-| `source_ids` | The ids involved: tag or tagging ids (`"ordinal:<n>"` when the id is null), object ids, or setting keys. |
+| `table` | `tags`, `taggings`, `objects`, `roles` or `settings`. |
+| `source_ids` | The ids involved: tag, tagging or role ids (`"ordinal:<n>"` when the id is null), object ids, or setting keys. |
 | `reason` | A generic sentence. It never holds a tag name or any content. |
 
 Sorted by `code`, `table` and `source_ids`. The codes of version 1:
@@ -224,17 +242,18 @@ Sorted by `code`, `table` and `source_ids`. The codes of version 1:
 | `case_variant_names` | warning | Names equal except for case. They stay apart, but the new tag API looks names up ignoring case. |
 | `scoped_tag_conflict` | warning | An object has two tags of the same `group::` scope, which 4.6.0 rejects when the object is edited. |
 | `comma_in_name` | warning | A name has a comma. It is imported as one tag, exactly, but the tag field of 4.6.0 is a comma separated list: the first ordinary edit of an object with this tag splits it into several tags. |
+| `unreadable_role_permissions` | warning | The `roles` table, its `permissions` column or the permissions of a role cannot be read. The tags import; no tag permission is given for those roles. |
 | `counter_mismatch` | information | A stored `taggings_count` differs from the real count. |
 
 ## Verification
 
 `TagsPackage::Verifier#verify(history:, csys:)` accepts a package only when:
 
-1. the archive holds exactly the five entries, safely named, contiguous and within the size limit;
+1. the archive holds exactly the six entries, safely named, contiguous and within the size limit;
 2. `manifest.json` is canonical, has exactly its four keys, `schema` `cosmosys-tags` and `schema_version` `"1"`, and its `content_sha256` matches;
 3. `content` has exactly its keys, `profile` is the profile of version 1 and `importable` is a boolean;
 4. every file matches its SHA-256, size and line count, is UTF-8, and each line is a canonical object with exactly the keys of its file;
-5. ordinals run 1, 2, ...; objects are unique and sorted; every tagging names an object; every object has either a well-formed target or a known reason; anomalies have known codes with their severity and are sorted;
+5. ordinals run 1, 2, ... (tags, taggings and roles); every role's `builtin` is an integer or `null` and its `tag_permissions` `null` or a sorted list of distinct tag permissions; objects are unique and sorted; every tagging names an object; every object has either a well-formed target or a known reason; anomalies have known codes with their severity and are sorted;
 6. `counts` equal the counts of the rows and `importable` equals "no blocking anomaly";
 7. `source` has its keys, `settings` exactly the ten keys with well-formed entries;
 8. when `importable` is `true`, the strict profile holds row by row, recomputed rather than read from the anomalies: both tables present, critical settings `"0"` or `"1"`, unique ids, exact valid unique names, no `source_extra`, every tagging with a unique tag, context `tags`, no tagger, type `Issue` or `WikiPage`, an object with a target, no collapsing taggings and no shared target among tagged objects;
@@ -261,4 +280,4 @@ Tag changes in the history are not part of this package. The old plugin recorded
 
 ## Versioning
 
-Version 1 readers accept only `schema` `cosmosys-tags` and `schema_version` `"1"`. Version 1 was extended in place before any package was published; the code `comma_in_name` is part of it. Any change to identity, names, context, tagger, order, the profile or the meaning of a row needs a new version, and so does any new exception to the strict profile. The version 1 verifier also rejects keys, anomaly codes and counts it does not know, so adding any of them needs a new version as well.
+Version 1 readers accept only `schema` `cosmosys-tags` and `schema_version` `"1"`. Version 1 was extended in place before any package was published: the code `comma_in_name`, `tables/roles.jsonl`, the counts `source_roles` and `roles_with_tag_permissions` and the code `unreadable_role_permissions` are part of it. Any change to identity, names, context, tagger, order, the profile or the meaning of a row needs a new version, and so does any new exception to the strict profile. The version 1 verifier also rejects keys, anomaly codes and counts it does not know, so adding any of them needs a new version as well.

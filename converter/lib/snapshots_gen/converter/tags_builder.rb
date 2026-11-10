@@ -58,9 +58,10 @@ module SnapshotsGen
         check_objects(objects, taggings)
         settings = resolve_settings
         check_visibility(settings, taggings)
+        roles = role_rows
         anomalies = @anomalies.sort_by { |row| TagsPackage.anomaly_sort_key(row) }.each_with_index.map { |row, index| row.merge('id' => index + 1) }
         @rows = { 'tags' => tags, 'taggings' => taggings, 'objects' => objects.values.sort_by { |row| TagsPackage.object_sort_key(row) },
-                  'anomalies' => anomalies }
+                  'roles' => roles, 'anomalies' => anomalies }
         @content = {
           'captured_at' => @source.content.fetch('captured_at'),
           'generator' => HistoryBuilder::GENERATOR,
@@ -90,7 +91,8 @@ module SnapshotsGen
         counts = TagsPackage.counts(@rows)
         report.add('tags_information', 'package', importable: @content['importable'],
                                                   **counts.slice('source_tags', 'source_taggings', 'objects', 'tagged_objects',
-                                                                 'unused_tags').transform_keys(&:to_sym))
+                                                                 'unused_tags', 'source_roles', 'roles_with_tag_permissions')
+                                                          .transform_keys(&:to_sym))
         @rows.fetch('anomalies').group_by { |row| row['code'] }.sort.each do |code, rows|
           severity, meaning = TagsPackage::ANOMALIES.fetch(code)
           ids = rows.flat_map { |row| row['source_ids'] }.first(20)
@@ -307,6 +309,29 @@ module SnapshotsGen
 
           code = group.any? { |row| tagged.include?(row['id']) } ? 'ambiguous_object' : 'ambiguous_untagged_object'
           anomaly(code, 'objects', group.map { |row| row['id'] }, "#{group.length} objects with one destination identity")
+        end
+      end
+
+      # Every source role, with the tag permissions it had (docs/cstags-format.md,
+      # "tables/roles.jsonl"). Only those four names are carried; the rest of
+      # the permissions are not part of this package.
+      def role_rows
+        unless @source.table?('roles')
+          anomaly('unreadable_role_permissions', 'roles', [], 'the legacy snapshot has no roles table')
+          return []
+        end
+        columns = @source.table_entry('roles').fetch('columns').map { |column| column.fetch('name') }
+        unless columns.include?('permissions')
+          anomaly('unreadable_role_permissions', 'roles', [], 'the roles table has no permissions column')
+        end
+        @source.raw_table('roles').each_with_index.map do |row, index|
+          permissions = columns.include?('permissions') ? TagsPackage.tag_permissions(row['permissions']) : nil
+          if permissions.nil? && columns.include?('permissions')
+            anomaly('unreadable_role_permissions', 'roles', [row['id'].nil? ? "ordinal:#{index + 1}" : row['id']],
+                    'permissions are not a plain YAML list')
+          end
+          { 'id' => row['id'], 'name' => row['name'], 'builtin' => row['builtin'].is_a?(Integer) ? row['builtin'] : nil,
+            'tag_permissions' => permissions, 'ordinal' => index + 1 }
         end
       end
 

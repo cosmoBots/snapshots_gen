@@ -140,7 +140,7 @@ Deja en `migracion/convertido/`:
 
 - un `.csys` por cada proyecto raíz de la instancia antigua (`<nombre>-<identificador>.csys`), con sus subproyectos;
 - `<nombre>.cshistory`, el paquete de historial y usuarios;
-- `<nombre>.cstags`, el paquete de etiquetas de toda la instancia (también las que no usa ningún ítem), ligado a los `.csys` y al `.cshistory` de esta misma conversión;
+- `<nombre>.cstags`, el paquete de etiquetas de toda la instancia (también las que no usa ningún ítem), con los permisos de etiquetas que tenía cada rol, ligado a los `.csys` y al `.cshistory` de esta misma conversión;
 - `report.md` y `report.json`, el informe de conversión.
 
 **Lee `report.md` antes de seguir.** Está ordenado por gravedad:

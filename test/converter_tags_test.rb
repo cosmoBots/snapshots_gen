@@ -144,6 +144,79 @@ class ConverterTagsTest < Minitest::Test
     end
   end
 
+  def test_tag_permissions_of_the_source_roles
+    tables = tag_tables([tag(1, 'one', 1)], [tagging(1, 1, 'Issue', 1)])
+    tables['roles'] += [
+      ConverterFixture.role(6, 'Strange', 0, []).merge('permissions' => "--- !ruby/object:OpenStruct\ntable: {}\n"),
+      ConverterFixture.role(7, 'Mapped', 0, []).merge('permissions' => "---\nview_issue_tags: true\n"),
+      ConverterFixture.role(8, 'Empty', 0, []).merge('permissions' => nil),
+      ConverterFixture.role(9, 'Quoted', 0, []).merge('permissions' => "---\n- view_issue_tags\n- \":add_wiki_tags\"\n- :x\n")
+    ]
+    convert(tables) do |package, _summary, report|
+      assert package.importable?
+      roles = package.rows.fetch('roles').to_h { |row| [row['name'], row] }
+      assert_equal({ 'builtin' => 1, 'id' => 1, 'name' => 'Non member', 'ordinal' => 1, 'tag_permissions' => %w[view_issue_tags] },
+                   roles['Non member'])
+      assert_equal [], roles['Anonymous']['tag_permissions']
+      assert_equal TP::TAG_PERMISSIONS, roles['rqMngr']['tag_permissions']
+      assert_equal %w[view_issue_tags], roles['rqReader']['tag_permissions']
+      assert_equal [], roles['rqWriter']['tag_permissions']
+      # Never loaded as Ruby objects: a tagged or mapped value is unreadable, not guessed.
+      assert_nil roles['Strange']['tag_permissions']
+      assert_nil roles['Mapped']['tag_permissions']
+      assert_equal [], roles['Empty']['tag_permissions']
+      assert_equal %w[add_wiki_tags view_issue_tags], roles['Quoted']['tag_permissions']
+      unreadable = package.rows.fetch('anomalies').select { |row| row['code'] == 'unreadable_role_permissions' }
+      assert_equal [[6], [7]], unreadable.map { |row| row['source_ids'] }
+      assert_equal %w[roles roles], unreadable.map { |row| row['table'] }
+      assert_equal 9, package.content.dig('counts', 'source_roles')
+      assert_equal 4, package.content.dig('counts', 'roles_with_tag_permissions')
+      info = report['entries'].find { |entry| entry['code'] == 'tags_information' && entry['subject'] == 'package' }
+      assert_equal 4, info['detail']['roles_with_tag_permissions'], info.inspect
+    end
+    tables = tag_tables([tag(1, 'one', 1)], [tagging(1, 1, 'Issue', 1)])
+    tables.delete('roles')
+    convert(tables) do |package|
+      # Without roles the tags still import; nobody gets permissions from the package.
+      assert package.importable?
+      assert_empty package.rows.fetch('roles')
+      assert_equal({ 'unreadable_role_permissions' => 1 }, codes(package))
+    end
+  end
+
+  def test_verifier_rejects_forged_roles
+    convert(tag_tables([tag(1, 'one', 1)], [tagging(1, 1, 'Issue', 1)])) do |package|
+      Dir.mktmpdir('cstags-roles') do |tmp|
+        content = package.content.reject { |key, _value| %w[profile files counts].include?(key) }
+        { 'unknown' => %w[view_issue_tags delete_everything], 'unsorted' => %w[view_issue_tags add_wiki_tags], 'text' => 'view_issue_tags' }
+          .each do |label, permissions|
+            rows = package.rows.transform_values { |list| list.map(&:dup) }
+            rows['roles'].first['tag_permissions'] = permissions
+            forged = File.join(tmp, "#{label}.cstags")
+            TP.write(forged, content: content, rows: rows)
+            errors = TP::Verifier.new(forged).verify.errors
+            assert(errors.any? { |error| error.include?('tag_permissions that are not a sorted list') }, "#{label}: #{errors.inspect}")
+          end
+        # The manifest counts the roles: a row removed after writing does not verify.
+        rows = package.rows.transform_values { |list| list.map(&:dup) }
+        forged = File.join(tmp, 'counted.cstags')
+        manifest = TP.write(forged, content: content, rows: rows)
+        assert_equal 3, manifest.dig('content', 'counts', 'roles_with_tag_permissions')
+        Zip::OutputStream.open(File.join(tmp, 'dropped.cstags')) do |zip|
+          Zip::File.open(forged) do |archive|
+            archive.each do |entry|
+              data = entry.get_input_stream(&:read)
+              data = data.lines.drop(1).join if entry.name == 'tables/roles.jsonl'
+              zip.put_next_entry(entry.name)
+              zip.write(data)
+            end
+          end
+        end
+        assert_includes TP::Verifier.new(File.join(tmp, 'dropped.cstags')).verify.errors, 'tables/roles.jsonl has a different SHA-256'
+      end
+    end
+  end
+
   def test_rows_the_destination_cannot_hold_block_the_import
     invalid = { '$base64' => Base64.strict_encode64("bad \xFF".b) }
     tags = [tag(1, 'ok'), tag(2, nil), tag(3, ''), tag(4, '   '), tag(5, ' edge'), tag(6, "nul\u0000"), tag(7, "#{LONG}y"),
