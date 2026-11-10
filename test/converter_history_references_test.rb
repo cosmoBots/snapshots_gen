@@ -7,22 +7,10 @@
 # has to drop anything on its own. Every name and text is invented.
 
 require 'minitest/autorun'
-require 'tmpdir'
-require_relative '../exporter/legacy_snapshot_format'
-require_relative '../converter/lib/snapshots_gen/converter/source'
-require_relative '../converter/lib/snapshots_gen/converter/report'
-require_relative '../converter/lib/snapshots_gen/converter/plan'
-require_relative '../converter/lib/snapshots_gen/converter/history_builder'
+require_relative 'converter_snapshot_helper'
 
 class ConverterHistoryReferencesTest < Minitest::Test
-  LS = SnapshotsGen::LegacySnapshot
-  Converter = SnapshotsGen::Converter
-  TIME = '2021-03-04T05:06:07.000000Z'
-
-  def issue(id, parent_id = nil)
-    { 'id' => id, 'project_id' => 1, 'tracker_id' => 1, 'status_id' => 1, 'subject' => "Item #{id}",
-      'description' => '', 'parent_id' => parent_id, 'author_id' => 1, 'created_on' => TIME, 'updated_on' => TIME }
-  end
+  include ConverterSnapshotHelper
 
   def journal(id, issue_id, notes = '')
     { 'id' => id, 'journalized_id' => issue_id, 'journalized_type' => 'Issue', 'user_id' => 1, 'notes' => notes,
@@ -37,16 +25,7 @@ class ConverterHistoryReferencesTest < Minitest::Test
   # Items 1, 2 and 3 exist; 90 and 91 were deleted from the old instance.
   # Version 5 exists, version 6 was deleted.
   def tables
-    {
-      'trackers' => [{ 'id' => 1, 'name' => 'csInfo' }],
-      'issue_statuses' => [{ 'id' => 1, 'name' => 'csNone', 'is_closed' => false }],
-      'users' => [{ 'id' => 1, 'type' => 'User', 'login' => 'author', 'firstname' => 'A', 'lastname' => 'B',
-                    'admin' => false, 'status' => 1 }],
-      'projects' => [{ 'id' => 1, 'identifier' => 'alpha', 'name' => 'Alpha', 'parent_id' => nil, 'lft' => 1,
-                       'rgt' => 2, 'status' => 1, 'is_public' => true }],
-      'cosmosys_projects' => [{ 'id' => 1, 'project_id' => 1, 'prefix' => 'ALP' }],
-      'issues' => [issue(1), issue(2), issue(3, 2)],
-      'cosmosys_issues' => [1, 2, 3].map { |id| { 'id' => id, 'issue_id' => id, 'identifier' => format('ALP-%04d', id), 'chapter_order' => id } },
+    base_tables([issue(1), issue(2), issue(3, parent_id: 2)]).merge(
       'versions' => [{ 'id' => 5, 'project_id' => 1, 'name' => 'v1', 'status' => 'open', 'sharing' => 'none' }],
       'journals' => [journal(10, 3), journal(11, 3), journal(12, 3), journal(13, 3, 'A note'), journal(14, 3),
                      journal(15, 3), journal(16, 3)],
@@ -60,48 +39,11 @@ class ConverterHistoryReferencesTest < Minitest::Test
         detail(106, 16, 'parent_id', nil, '90'),
         detail(107, 16, 'subject', 'Old', 'New')
       ]
-    }
-  end
-
-  def legacy(directory, tables)
-    writer = LS::Writer.new(directory)
-    tables.each do |name, rows|
-      names = rows.flat_map(&:keys).uniq
-      columns = names.map do |column|
-        sample = rows.map { |row| row[column] }.compact.first
-        type = case sample
-               when Integer then 'integer'
-               when true, false then 'boolean'
-               else column.end_with?('_on', '_at') ? 'datetime' : 'text'
-               end
-        { 'name' => column, 'type' => type, 'sql_type' => type, 'null' => true }
-      end
-      rows = rows.map { |row| names.to_h { |column| [column, row[column]] } }.sort_by { |row| row['id'] }
-      writer.write_table(name, columns: columns, primary_key: ['id'], order_by: ['id']) do |emit|
-        rows.each { |row| emit.call(row) }
-      end
-    end
-    writer.write_report_rows('redactions', [])
-    writer.write_report_document('inventory', { 'plugins' => [] })
-    writer.finish!(captured_at: TIME, generator: { 'name' => 'test', 'version' => '0' },
-                   source: { 'label' => 'test', 'redmine_version' => '4.2.10', 'settings' => { 'text_formatting' => 'common_mark' } },
-                   consistency: { 'mode' => 'none' })
-    directory
-  end
-
-  def convert
-    Dir.mktmpdir('converter-references') do |tmp|
-      Converter::Source.open(legacy(File.join(tmp, 'legacy'), tables)) do |source|
-        report = Converter::Report.new
-        plan = Converter::Plan.new(source, report).build!
-        entities = Converter::HistoryBuilder.new(plan, csys_packages: []).entities
-        yield entities, report, plan
-      end
-    end
+    )
   end
 
   def test_deleted_records_are_cleared_never_kept_as_numbers
-    convert do |entities, report, plan|
+    convert(tables) do |entities, report, plan|
       details = entities.fetch('journal_details').to_h { |row| [row['id'], row] }
       journals = entities.fetch('journals').map { |row| row['id'] }
 

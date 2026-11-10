@@ -24,6 +24,7 @@ module SnapshotsGen
         'document_metadata_extracted' => ['transformation', 'Document codes, versions and dates read from titles'],
         'catalog_reference' => ['transformation', 'Catalog references created'],
         'datum_created' => ['transformation', 'Requirement variables (rqVar, rqValue) turned into project data'],
+        'data_section_created' => ['transformation', 'Project data chapters generated for those variables'],
         'status_mapped' => ['transformation', 'Statuses renamed'],
         'tracker_mapped' => ['transformation', 'Trackers renamed'],
         'field_native' => ['transformation', 'Custom field values moved to native fields'],

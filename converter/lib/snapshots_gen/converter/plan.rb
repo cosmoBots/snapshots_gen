@@ -37,6 +37,7 @@ module SnapshotsGen
         plan_hierarchy!
         plan_data!
         plan_identities!
+        report_data_sections!
         plan_positions!
         plan_catalog_and_relations!
         plan_fields!
@@ -417,6 +418,15 @@ module SnapshotsGen
             @items[datum.key] = datum
             report.add('datum_created', datum.key, variable: name, value: value, requirement: requirement.key)
           end
+        end
+      end
+
+      # The "Project data" chapters exist only in the new instance; once
+      # their CSID is known, the report names them.
+      def report_data_sections!
+        @items.each_value.select { |item| item.synthetic == 'data_section' }.each do |section|
+          report.add('data_section_created', section.key, project: project_identifier(section.project_id), csid: section.csid,
+                                                          data: @items.each_value.count { |item| item.parent_key == section.key })
         end
       end
 
