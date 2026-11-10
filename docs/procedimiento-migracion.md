@@ -239,10 +239,18 @@ docker cp snapshots_gen/test/history_text.rb <contenedor-nuevo>:/tmp/sg/history_
 docker exec -u redmine -w /usr/src/redmine <contenedor-nuevo> bundle exec rails runner /tmp/sg/history_text.rb /tmp/sg/destino.jsonl es
 docker cp <contenedor-nuevo>:/tmp/sg/destino.jsonl migracion/
 docker run --rm -v "$PWD:/work" snapshots_gen-converter \
-  ruby snapshots_gen/test/compare_history.rb migracion/origen.jsonl migracion/destino.jsonl migracion/convertido/report.json
+  ruby snapshots_gen/test/compare_history.rb migracion/origen.jsonl migracion/destino.jsonl migracion/convertido/report.json \
+  --history migracion/convertido/<exportacion>.cshistory \
+  --import-report migracion/importado/history-import-<fecha>.json
 ```
 
-Tiene que terminar en `Failures (0)`. Antes enseña las diferencias que la conversión hace a propósito (estados y campos renombrados, números de ítem nuevos, relaciones PORIS invertidas), para revisarlas. Un fallo nombra el ítem por su CSID y lo que no coincide. La línea "Labels cosmoSys lacks for its own native fields" no es un fallo de la migración: es la etiqueta de `csExtCode` y `csWLoad` que le falta a cosmoSys (ver "Qué cambia en la conversión").
+Sustituye `<exportacion>` y `<fecha>` por los nombres de los ficheros de esta ejecución. Copia el informe JSON de la importación real del historial desde `/tmp/sg/pkg/` del contenedor nuevo a `migracion/importado/` (no uses el informe del ensayo). Si hay varios informes de importación real que correspondan a esta migración, repite `--import-report` para cada uno.
+
+Tiene que terminar en `Failures (0)` y `Unexplained differences (0)`; devuelve 1 si cualquiera es distinto de cero y 2 si no puede leer o validar las entradas. `Explained differences` agrupa los cambios por regla del conversor o entrada concreta de `report.json`; añade `--details` para ver su detalle o `--show CSID` para inspeccionar un ítem. Un detalle perdido sin descarte declarado, un descarte del importador, una referencia a otro ítem, una nota editada y cualquier `Translation missing` son fallos. Las diferencias de presentación que no cubra una regla siguen en `Unexplained differences` y requieren investigación, nunca se aceptan automáticamente.
+
+Los recuentos de explicaciones son por regla aplicada, no por journal: un detalle puede tener una explicación para sus valores y otra para su presentación.
+
+Los dos JSONL deben generarse con la misma versión de `history_text.rb` (formato `history-text-v2`) y el mismo idioma. Conservan los valores completos, incluso los que el Redmine antiguo oculta al pintar campos de texto largo, y son material sensible. La extracción los crea con modo 600; protege también cualquier salida de `--details` o `--show`. Este paso comprueba historial e identidades, no sustituye la comprobación del estado actual ni la de etiquetas.
 
 Por último, entra como administrador y abre dos o tres ítems con historial, la wiki y un proyecto privado con un usuario normal (con su contraseña de siempre).
 
