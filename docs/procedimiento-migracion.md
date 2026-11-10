@@ -235,20 +235,30 @@ export COSMOSYS_ENV_FILE=<ruta absoluta del fichero de entorno de la instancia n
 
 ## 1. Inventario
 
-El inventario cuenta lo que hay sin sacar contenido: versiones, plugins, trackers, estados, campos, notas por tipo de cambio, versiones de wiki con huecos, usuarios con 2FA y los ajustes de formato de texto. Se pasa primero para saber si la instancia tiene algo que el procedimiento no cubre.
+En el servidor antiguo. El inventario cuenta lo que hay sin sacar contenido: versiones, plugins, trackers, estados, campos, notas por tipo de cambio, versiones de wiki con huecos, adjuntos, usuarios con 2FA, etiquetas y los ajustes de formato de texto. Se pasa primero para saber si la instancia tiene algo que el procedimiento no cubre.
+
+Copia en el contenedor el código que usan los pasos 1 a 3 y pasa el inventario:
 
 ```sh
-docker cp snapshots_gen/exporter <contenedor-antiguo>:/tmp/snapshots_gen-exporter
-docker exec -u redmine -w /usr/src/redmine <contenedor-antiguo> \
-  bundle exec rails runner -e production /tmp/snapshots_gen-exporter/export.rb inventory out=/tmp/snapshots_gen-out
-docker cp <contenedor-antiguo>:/tmp/snapshots_gen-out migracion/inventario
+docker exec -u 0 "$ANTIGUO" mkdir -p /tmp/snapshots_gen-code
+docker cp snapshots_gen/exporter "$ANTIGUO":/tmp/snapshots_gen-code/exporter
+docker cp snapshots_gen/test/history_text.rb "$ANTIGUO":/tmp/snapshots_gen-code/history_text.rb
+docker cp snapshots_gen/test/tags "$ANTIGUO":/tmp/snapshots_gen-code/tags
+docker exec -u 0 "$ANTIGUO" chown -R redmine:redmine /tmp/snapshots_gen-code
+docker exec -u redmine -w /usr/src/redmine "$ANTIGUO" \
+  bundle exec rails runner -e production /tmp/snapshots_gen-code/exporter/export.rb inventory out=/tmp/snapshots_gen-out/inventario
+docker cp "$ANTIGUO":/tmp/snapshots_gen-out/inventario migracion/inventario
+chmod -R go-rwx migracion
+find migracion -perm /077
 ```
 
-La orden imprime un resumen y deja el inventario completo en `migracion/inventario/inventory-*.json`. Comprueba en el resumen:
+El `chown` hace falta porque `docker cp` deja los ficheros a nombre de root dentro del contenedor, y con `umask 077` el usuario `redmine` no podría leerlos. La orden imprime un resumen y deja el inventario completo en `migracion/inventario/inventory-*.json`. Comprueba en el resumen:
 
+- La primera línea: la versión de Redmine y de la base de datos. Lo ensayado es Redmine 4.2.10 sobre MySQL 5.7; con otra, ensaya antes con una copia.
 - `text_formatting="markdown"`. Si dice `textile`, para: esa conversión no está cubierta.
-- `Trackers` y `Statuses`: los de cosmoSys (`rq`, `csInfo`, `csRefDoc`, estados `rq*`, `csNone`) se convierten solos. Cualquier otro tracker con ítems (`Bug`, `Task`, `prSys`...) tiene que existir con el mismo nombre en la instancia nueva (paso 5).
-- `Users`: cuántos tienen 2FA y si alguno usa autenticación externa (LDAP). Los de autenticación externa no tienen contraseña en Redmine y no podrán entrar hasta que se les dé una.
+- `Trackers` y `Statuses`: los de cosmoSys (`rq`, `csInfo`, `csRefDoc`, estados `rq*`, `csNone`) se convierten solos. Si hay ítems de trackers `pr*`, la instancia usa PORIS: para (ver "Qué hace y qué no"). Cualquier otro tracker con ítems (`Bug`, `Task`, `Test Case`...) tiene que existir con el mismo nombre en la instancia nueva antes de importar: apunta sus nombres exactos para el paso 5.
+- `Attachments`: cuánto ocupan (para el espacio) y cuántos no tienen fichero. Los que no tienen fichero no se pueden migrar; el informe de conversión los cuenta.
+- `Users`: cuántos tienen 2FA (tendrán que volver a activarlo) y cuántos usan autenticación externa (LDAP), que no podrán entrar hasta que se les dé una contraseña.
 - `Ambiguous Markdown tables`: tablas Markdown con la cabecera sangrada, que el cosmoSys nuevo enseña como código. No bloquean; el informe de conversión dice dónde están.
 - `Tags`: las etiquetas, solo recuentos (nunca nombres). Lo normal es que todo lo que va después del punto y coma valga 0, con un solo contexto y 0 con autor: entonces no hay nada que decidir. Qué significa cada recuento:
   - `tags`, `unused` y `taggings` (por tipo): cuántas etiquetas hay, cuántas no usa ningún ítem ni página, y cuántos etiquetados hay en ítems (`Issue`) y en páginas de wiki (`WikiPage`). Todas se migran, también las sin uso, pero el plugin nuevo borra las sin uso en cuanto alguien edita un ítem. Otro tipo distinto de `Issue` y `WikiPage` no se puede migrar: la conversión lo bloquea.
@@ -258,46 +268,96 @@ La orden imprime un resumen y deja el inventario completo en `migracion/inventar
   - `scope conflicts on one object`: ítems con dos etiquetas del mismo grupo `grupo::` (`grupo::uno` y `grupo::dos`). El plugin nuevo no deja guardar ese ítem hasta quitar una.
   - `names with edge spaces`: nombres con espacios al principio o al final. El plugin nuevo los recortaría, así que la conversión los bloquea: hay que renombrarlos en la instancia antigua.
   - `tag changes in the history`: cambios de etiquetas en el historial de los ítems. Se migran literalmente.
+  - Si la línea dice `Tags: no additional_tags and additional_taggings tables`, la instancia no tiene el plugin de etiquetas y la conversión se bloqueará (`missing_table`): para y pregunta antes de seguir.
 
-Si algo de esto no cuadra, manda el `inventory-*.json` antes de seguir. No lleva contenido de la instancia.
+Si algo de esto no cuadra, pide ayuda con el `inventory-*.json` por un canal privado antes de seguir. No lleva personas ni contenido, pero sí los nombres de trackers, estados, campos y roles.
 
 ## 2. Congelar la instancia antigua
 
-Desde aquí hasta el final nadie debe cambiar nada en la instancia antigua, o esos cambios no llegarán a la nueva. Avisa a los usuarios y activa el modo mantenimiento (Administración, Plugins, Redmine Maintenance Mode), o como mínimo deja de usarla.
+Desde aquí hasta el paso 8 nadie debe cambiar nada en la instancia antigua, o esos cambios no llegarán a la nueva. Avisa a los usuarios y activa el modo mantenimiento si la instancia lo tiene (Administración, Plugins, Redmine Maintenance Mode), o como mínimo deja de usarla.
 
-## 3. Exportar
+## 3. Exportar y tomar las referencias
+
+En el servidor antiguo.
+
+### 3.1. Exportar
 
 ```sh
-docker exec -u redmine -w /usr/src/redmine <contenedor-antiguo> \
-  bundle exec rails runner -e production /tmp/snapshots_gen-exporter/export.rb capture out=/tmp/snapshots_gen-out label=<nombre>
-docker cp <contenedor-antiguo>:/tmp/snapshots_gen-out migracion/exportado
-docker exec -u 0 <contenedor-antiguo> rm -rf /tmp/snapshots_gen-exporter /tmp/snapshots_gen-out
+docker exec -u redmine -w /usr/src/redmine "$ANTIGUO" \
+  bundle exec rails runner -e production /tmp/snapshots_gen-code/exporter/export.rb capture out=/tmp/snapshots_gen-out/exportado label="$NOMBRE"
+docker cp "$ANTIGUO":/tmp/snapshots_gen-out/exportado migracion/exportado
 ```
 
-`<nombre>` es una etiqueta corta para la instancia, con letras, números, `-` o `_` (por ejemplo, `antigua`). El exportador lee todo en una sola transacción de solo lectura, copia los adjuntos, comprueba que los recuentos no han cambiado mientras leía y verifica el paquete antes de terminar. Al final dice:
+El exportador lee todo en una sola transacción de solo lectura, copia los adjuntos, comprueba que los recuentos no han cambiado mientras leía y verifica el paquete antes de terminar. Al final dice:
 
 ```text
 Captured N tables, N rows, N attachment rows.
 Gaps: none.
-Package written to /tmp/snapshots_gen-out/<nombre>-<fecha>.cslegacy (...), verified.
+Redactions: N.
+Package written to /tmp/snapshots_gen-out/exportado/<nombre>-<fecha>.cslegacy (...), verified.
 ```
 
-`Gaps` lista lo que no se pudo copiar tal cual, normalmente adjuntos cuyo fichero ya no existe. No impide seguir; el informe de conversión los repite.
+`Gaps` lista lo que no se pudo copiar tal cual, normalmente adjuntos cuyo fichero ya no existe. No impide seguir; el informe de conversión los repite. `Redactions` cuenta los secretos que se han dejado en blanco (claves del 2FA, contraseñas de servicios).
 
-Para comprobar el paquete en otro sitio (por ejemplo, después de copiarlo):
+### 3.2. Tomar las referencias para comprobar
+
+El paso 7 compara la instancia nueva con la antigua: el historial de cada ítem y las etiquetas. Como la antigua ya está congelada, sus referencias se toman ahora y viajan con el paquete, y así el paso 7 se hace entero en el servidor nuevo:
 
 ```sh
-docker build -t snapshots_gen-converter snapshots_gen/converter
-docker run --rm -v "$PWD:/work" snapshots_gen-converter \
-  ruby snapshots_gen/bin/verify-legacy-snapshot migracion/exportado/<nombre>-<fecha>.cslegacy
+docker exec -u redmine -w /usr/src/redmine "$ANTIGUO" \
+  bundle exec rails runner -e production /tmp/snapshots_gen-code/history_text.rb /tmp/snapshots_gen-out/historial-origen.jsonl es
+docker exec -u redmine -w /usr/src/redmine "$ANTIGUO" \
+  bundle exec rails runner -e production /tmp/snapshots_gen-code/tags/extract_source.rb /tmp/snapshots_gen-out/etiquetas-origen.jsonl
+docker cp "$ANTIGUO":/tmp/snapshots_gen-out/historial-origen.jsonl migracion/
+docker cp "$ANTIGUO":/tmp/snapshots_gen-out/etiquetas-origen.jsonl migracion/
 ```
+
+La primera dice `wrote /tmp/snapshots_gen-out/historial-origen.jsonl` y la segunda `tags evidence: objects=N tags=N assignments=N`. El `es` es el idioma en el que se pinta el historial: el paso 7 usa el mismo.
+
+### 3.3. Limpiar el contenedor antiguo
+
+```sh
+docker exec -u 0 "$ANTIGUO" rm -rf /tmp/snapshots_gen-code /tmp/snapshots_gen-out
+docker exec "$ANTIGUO" sh -c 'ls -d /tmp/snapshots_gen-* 2>/dev/null || echo limpio'
+chmod -R go-rwx migracion
+find migracion -perm /077
+```
+
+La segunda orden tiene que decir `limpio`, y la última no tiene que imprimir nada.
+
+### 3.4. Llevar los ficheros al servidor nuevo
+
+Si los dos servidores son el mismo, salta este apartado. Si no, todo `migracion/` viaja al directorio de trabajo del servidor nuevo, por SSH (ver "Material sensible"). En el servidor antiguo:
+
+```sh
+(cd migracion && find . -type f ! -name SHA256SUMS -exec sha256sum {} + > SHA256SUMS)
+rsync -a -e ssh migracion/ <usuario>@<servidor-nuevo>:<directorio de trabajo>/migracion/
+```
+
+`rsync -a` conserva los permisos 600 y 700. Si los servidores no se ven entre sí, pásalo por tu equipo sin guardarlo en él: `scp -3 -rp <usuario>@<servidor-antiguo>:<directorio de trabajo>/migracion <usuario>@<servidor-nuevo>:<directorio de trabajo>/`. En el servidor nuevo, desde su directorio de trabajo:
+
+```sh
+(cd migracion && sha256sum -c SHA256SUMS)
+chmod -R go-rwx migracion
+find migracion -perm /077
+```
+
+Cada fichero tiene que decir `OK`. Cuando sea así, borra `migracion/` del servidor antiguo (`rm -rf migracion`): ya no hace falta allí.
 
 ## 4. Convertir
 
+En el servidor nuevo. La conversión corre en un contenedor con un Ruby actual; primero se construye su imagen (necesita salida a Docker Hub y a rubygems):
+
 ```sh
+docker build -t snapshots_gen-converter snapshots_gen/converter
+CSLEGACY=$(ls migracion/exportado/*.cslegacy); echo "$CSLEGACY"
+docker run --rm -v "$PWD:/work" snapshots_gen-converter \
+  ruby snapshots_gen/bin/verify-legacy-snapshot "$CSLEGACY"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work" snapshots_gen-converter \
-  ruby snapshots_gen/converter/convert.rb migracion/exportado/<nombre>-<fecha>.cslegacy migracion/convertido
+  ruby snapshots_gen/converter/convert.rb "$CSLEGACY" migracion/convertido
 ```
+
+El `echo` tiene que enseñar un solo fichero, el que exportó el paso 3. La comprobación dice `valid: N tables, N rows, N assets`. La conversión termina con `blocking: false`, `tags_importable: true` y `Report: migracion/convertido/report.md`, y con código 0 (1 si hay algo `Blocking`). `migracion/convertido` no puede existir antes: para repetir la conversión, bórralo, y si ya importaste algo, empieza también de nuevo desde el paso 5 (los paquetes de dos conversiones no se mezclan). El `-u` hace que los ficheros sean tuyos y no de root.
 
 Deja en `migracion/convertido/`:
 
