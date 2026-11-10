@@ -299,17 +299,81 @@ class TagsComparisonTest < Minitest::Test
     rejects('unexpected_assignment_field')
   end
 
-  def test_generated_unlabelled_chapters_require_two_matching_report_entries
+  def generated(subject, kind, csid, from)
+    { 'code' => 'item_generated', 'subject' => subject,
+      'detail' => { 'kind' => kind, 'project' => 'demo', 'csid' => csid, 'from' => from } }
+  end
+
+  def generated_object(id, csid)
+    { 'kind' => 'object', 'id' => id, 'type' => 'Issue', 'project' => 'demo', 'csid' => csid, 'source_order' => nil }
+  end
+
+  def test_generated_chapter_needs_its_announcement_and_final_identity_and_no_tags
     @report['entries'] += [
       { 'code' => 'synthetic_chapter', 'subject' => 'Invented chapter', 'detail' => { 'around' => 'item:1' } },
-      { 'code' => 'identity_renumbered', 'subject' => 'item:group-1', 'detail' => { 'from' => nil, 'to' => 'DEMO-0010' } }
+      generated('item:group-1', 'group', 'DEMO-0010', 'item:1')
     ]
-    @target << { 'kind' => 'object', 'id' => 110, 'type' => 'Issue', 'project' => 'demo', 'csid' => 'DEMO-0010', 'source_order' => nil }
-    assert_empty compare.failures
+    @target << generated_object(110, 'DEMO-0010')
+    result = compare
+    assert_empty result.failures
+    assert_includes result.information, 'generated_unlabelled_item kind=group subject=item:group-1 (report)'
     @target << of(@target, 'assignment').first.merge('id' => 110, 'taggable_id' => 110)
+    rejects('generated_item_has_tags')
     rejects('assignment expected=0 actual=1')
-    @report['entries'].pop
+    @target.pop
+    @target.pop
+    rejects('object_coverage expected=1 actual=0')
+  end
+
+  def test_generated_chapter_without_its_identity_or_announcement_is_invalid
+    chapter = { 'code' => 'synthetic_chapter', 'subject' => 'Invented chapter', 'detail' => { 'around' => 'item:1' } }
+    @target << generated_object(110, 'DEMO-0010')
+    @report['entries'] = [chapter]
     assert_raises(TagsEvidence::InvalidEvidence) { compare }
+    # The old contract (a renumbering of item:group-N) is not an identity.
+    @report['entries'] = [chapter, { 'code' => 'identity_renumbered', 'subject' => 'item:group-1',
+                                     'detail' => { 'from' => nil, 'to' => 'DEMO-0010' } }]
+    assert_raises(TagsEvidence::InvalidEvidence) { compare }
+    @report['entries'] = [generated('item:group-1', 'group', 'DEMO-0010', 'item:1')]
+    assert_raises(TagsEvidence::InvalidEvidence) { compare }
+    [generated('item:group-1', 'datum', 'DEMO-0010', 'item:1'), generated('item:group-1', 'group', 'DEMO-0010', 'item:2'),
+     generated('item:group-1', 'group', nil, 'item:1')].each do |wrong|
+      @report['entries'] = [chapter, wrong]
+      assert_raises(TagsEvidence::InvalidEvidence) { compare }
+    end
+  end
+
+  def test_generated_data_chapter_and_datum_match_their_announcements
+    issue = of(@source, 'object').first
+    @report['entries'] += [
+      { 'code' => 'data_section_created', 'subject' => 'item:data-1', 'detail' => { 'project' => 'demo', 'csid' => 'DEMO-0011', 'data' => 1 } },
+      { 'code' => 'datum_created', 'subject' => "item:datum-#{issue['id']}",
+        'detail' => { 'variable' => 'speed', 'value' => '3', 'requirement' => "item:#{issue['id']}" } },
+      generated('item:data-1', 'data_section', 'DEMO-0011', nil),
+      generated("item:datum-#{issue['id']}", 'datum', 'speed', "item:#{issue['id']}")
+    ]
+    @target << generated_object(111, 'DEMO-0011') << generated_object(112, 'speed')
+    result = compare
+    assert_empty result.failures
+    assert_equal 2, result.information.count { |line| line.start_with?('generated_unlabelled_item') }
+
+    @target << of(@target, 'assignment').first.merge('id' => 112, 'taggable_id' => 112)
+    rejects('generated_item_has_tags')
+    @target.pop
+
+    # Each generated entry must agree with its announcement.
+    [[2, 'csid', 'DEMO-0099'], [0, 'csid', 'DEMO-0099'], [3, 'csid', 'other'], [3, 'from', "item:#{issue['id'] + 1}"],
+     [2, 'from', 'item:1'], [1, 'variable', 'other']].each do |index, key, wrong|
+      saved = @report['entries'][index]['detail'][key]
+      @report['entries'][index]['detail'][key] = wrong
+      assert_raises(TagsEvidence::InvalidEvidence, "#{index} #{key}") { compare }
+      @report['entries'][index]['detail'][key] = saved
+    end
+    assert_empty compare.failures
+
+    # A generated item belongs to the project of its origin.
+    @report['entries'][3]['detail']['project'] = 'other-project'
+    rejects('report_generated_project_mismatch')
   end
 
   # Every new cosmoSys instance brings projects of its own (help wikis): they
