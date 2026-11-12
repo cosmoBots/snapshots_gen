@@ -163,7 +163,7 @@ grep '^COSMOSYS_REQ_REVISION=' .env.example
 grep -E '^PLUGIN_(additionals|additional_tags)_REVISION=' plugins.conf
 ```
 
-La primera y la segunda orden tienen que dar el mismo commit, `4d9e1c7e6d3ebf97c76590162fb1b19dd29f1338`, y las otras dos los de la tabla. Si `COSMOSYS_REVISION` es otro, ese checkout no instala cosmoSys 0.2.10: actualízalo (`git pull` en `main`) hasta una versión del deploy con ese pin antes de crear la instancia. El paso 5 comprueba después la imagen que de verdad corre.
+La primera y la segunda orden tienen que dar el mismo commit, `4d9e1c7e6d3ebf97c76590162fb1b19dd29f1338`, y las otras dos los de la tabla. Si `COSMOSYS_REVISION` es otro, ese checkout no instala cosmoSys 0.2.10: actualízalo en `main` con `(umask 022 && git pull)` (con el `umask` normal, ver la lista de comprobación de "Antes de empezar") hasta una versión del deploy con ese pin antes de crear la instancia. El paso 5 comprueba después la imagen que de verdad corre.
 
 ## Antes de empezar
 
@@ -191,7 +191,7 @@ En total, del paso 1 al 7, unos 30 minutos en el ensayo, casi todos en el paquet
 ### Lista de comprobación
 
 - [ ] Puedes ejecutar `docker` en el servidor antiguo y sabes el nombre del contenedor de Redmine de la instancia (`docker ps --format '{{.Names}}'`; en el despliegue antiguo de cosmoSys suele ser `csys_rm-<nombre>`). Este procedimiento supone ese despliegue: un contenedor con Redmine en `/usr/src/redmine` y un usuario `redmine` dentro. Si tu instancia antigua corre de otra forma, las órdenes de los pasos 1 a 3 hay que adaptarlas.
-- [ ] En el servidor nuevo tienes Docker con Compose 2.20 o posterior, un checkout de `cosmoSys_deploy` con el pin de cosmoSys 0.2.10 (ver "Versiones con las que se ha ensayado") y salida a GitHub, Docker Hub y rubygems para construir las imágenes.
+- [ ] En el servidor nuevo tienes Docker con Compose 2.20 o posterior, un checkout de `cosmoSys_deploy` con el pin de cosmoSys 0.2.10 (ver "Versiones con las que se ha ensayado") y salida a GitHub, Docker Hub y rubygems para construir las imágenes. Ese checkout se clona y se actualiza con el `umask` normal, nunca con `umask 077`: la imagen copia ficheros del checkout con sus permisos, y si solo los puede leer su dueño, el usuario `redmine` del contenedor tampoco y el arranque falla (`cannot load such file -- /opt/cosmosys-deploy/bootstrap/apply.rb`). Por eso las órdenes de `git` sobre el deploy van en una subshell con `umask 022`, y `umask 077` queda para el directorio de trabajo, el fichero de entorno y las copias.
 - [ ] Hay espacio: en el servidor nuevo, unas cuatro veces lo que ocupan los adjuntos y la base de la instancia antigua (el paquete antiguo, los convertidos, su copia dentro del contenedor y la instancia ya importada); en el antiguo, unas dos veces. El inventario (paso 1) dice cuánto ocupan los adjuntos.
 - [ ] Sabes cómo llevarás los ficheros del servidor antiguo al nuevo (paso 3.4), si no son el mismo.
 - [ ] La ventana de congelación está acordada y los usuarios lo saben: del paso 2 al 8 nadie trabaja ni en la instancia antigua ni en la nueva.
@@ -774,7 +774,7 @@ grep '^COSMOSYS_PLUGINS=' "$COSMOSYS_ENV_FILE"
 sha256sum "$COPIA/SHA256SUMS"
 ```
 
-- El commit de `cosmoSys_deploy` que creó la instancia (la primera orden). El destino usa ese mismo commit.
+- El commit de `cosmoSys_deploy` que creó la instancia (la primera orden, que lo imprime completo, con 40 caracteres). Pásalo completo: el destino usa ese mismo commit.
 - Los conjuntos de plugins (la segunda orden, `tags` en lo ensayado) y la variante, `requirements`.
 - La suma de la lista de sumas de la copia (la tercera orden), para comprobar en el destino que llegó la misma.
 - El número de ítems de la instancia migrada: el total de la lista de peticiones con todos los estados (filtro "Estado: todos").
@@ -784,15 +784,15 @@ El fichero de entorno de la instancia de migración no viaja: lleva sus secretos
 
 ### Preparar el servidor de destino
 
-Se puede hacer antes de la ventana de congelación. En el servidor de destino, con las variables `DEPLOY` y `COSMOSYS_ENV_FILE` de "Preparar el directorio de trabajo" (aquí, las de la instancia de destino) y la terminal en `umask 077`:
+Se puede hacer antes de la ventana de congelación. En el servidor de destino, con las variables `DEPLOY` y `COSMOSYS_ENV_FILE` de "Preparar el directorio de trabajo" (aquí, las de la instancia de destino):
 
 ```sh
-git clone https://github.com/cosmoBots/cosmoSys_deploy.git "$DEPLOY"
-git -C "$DEPLOY" -c advice.detachedHead=false checkout <commit del deploy>
+(umask 022 && git clone https://github.com/cosmoBots/cosmoSys_deploy.git "$DEPLOY" && git -C "$DEPLOY" -c advice.detachedHead=false checkout <commit del deploy>)
 git -C "$DEPLOY" rev-parse HEAD
+umask 077
 ```
 
-La última orden tiene que dar el commit anotado. Comprueba después su pin como en "Versiones con las que se ha ensayado".
+El clon va con `umask 022`, en una subshell: la imagen copia ficheros del checkout con sus permisos, y con `umask 077` el usuario `redmine` del contenedor no podría leerlos y el arranque fallaría. Desde el `umask 077` de la última orden, todo lo que se crea (el fichero de entorno y la copia) queda solo para su dueño. `rev-parse` imprime el commit completo, de 40 caracteres: tiene que ser igual al anotado, o empezar por él si te lo dieron abreviado. Comprueba después su pin como en "Versiones con las que se ha ensayado".
 
 Crea el fichero de entorno como en el paso 5.1, con secretos nuevos generados en este servidor (`openssl rand`), un `COMPOSE_PROJECT_NAME` y un `COSMOSYS_SESSION_COOKIE_KEY` propios, `COSMOSYS_VARIANT=requirements` y el mismo `COSMOSYS_PLUGINS` que la instancia de migración. Diferencias con el 5.1:
 
@@ -845,7 +845,7 @@ Comprueba con el `echo` que `COSMOSYS_ENV_FILE` es el fichero de la instancia de
 - Los usuarios entran con su usuario y su contraseña de siempre. Las sesiones abiertas antes no valen, porque cada instancia tiene su propio `REDMINE_SECRET_KEY_BASE`: todos tienen que volver a entrar.
 - Publica la instancia como en el paso 8.2, en este servidor. La copia trae el "Nombre y ruta del servidor" y el "Protocolo" de serie (`localhost:3000` y HTTP). Con el proxy del deploy, el arranque debería ponerlos solo: compruébalo en los registros de `bootstrap`, como dice el 8.2, y si no salen esas líneas, ponlos tú (no está ensayado con una copia restaurada). Con un proxy propio o sin proxy, ponlos tú en Redmine (Administración, Configuración, General): sin proxy, por ejemplo, `<dirección o nombre>:<puerto>` y HTTP. Con ellos genera Redmine los enlaces de sus exportaciones y sus correos.
 - Comprueba desde otra máquina de la red de los usuarios que `curl -sI <dirección>/login | head -n 1` responde `200`. Entra por esa dirección como `admin`, mira que la lista de ítems con todos los estados tiene el número anotado y que un ítem con etiquetas las enseña. Con una cuenta normal, como en el paso 7.4, abre un proyecto privado del que sea miembro y un ítem con etiquetas.
-- Después, el paso 8.3 en este servidor. La copia restaurada es aquí el punto al que volver (paso 9: se restaura otra vez la misma copia), y se conserva y se borra como dicen los pasos 8.1 y 10.
+- Después, el paso 8.3 en este servidor. La copia restaurada es aquí el punto al que volver (paso 9: se restaura otra vez la misma copia, y se pierde lo que se hiciera en la instancia después), y se conserva y se borra como dicen los pasos 8.1 y 10.
 - En el servidor de migración, la instancia migrada no se abre nunca. Cuando la de destino esté abierta y comprobada, destrúyela como en el paso 9 (`down -v`, comprobando antes el `echo` de su `COSMOSYS_ENV_FILE`), borra su fichero de entorno y haz allí el paso 10, conservando la copia solo mientras dure el plazo de vuelta atrás.
 
 ### Si te equivocas
@@ -854,10 +854,11 @@ Comprueba con el `echo` que `COSMOSYS_ENV_FILE` es el fichero de la instancia de
 | --- | --- |
 | `restore.sh` sin `RESTORE_CONFIRMATION` o sin directorio | No ha tocado nada. Repite la orden completa. |
 | `service "db" is not running` | La instancia de destino no estaba arrancada. No ha tocado nada: arráncala (paso 5.2) y repite. |
+| `service "bootstrap" didn't complete successfully`, y en `(cd "$DEPLOY" && ./scripts/compose.sh logs bootstrap)` `cannot load such file -- /opt/cosmosys-deploy/bootstrap/apply.rb` (`LoadError`) | El checkout del deploy se clonó o se actualizó con `umask 077`. Dale lectura con `chmod -R go+rX "$DEPLOY"` (o vuelve a clonarlo como arriba) y repite `(cd "$DEPLOY" && ./scripts/compose.sh build)` y `(cd "$DEPLOY" && ./scripts/compose.sh up -d --wait)`. |
 | `FAILED` en `sha256sum -c`, o `Incomplete backup` | La copia llegó mal. No se ha restaurado nada: vuelve a llevarla. |
 | Restaurada en una instancia sin `tags` (las etiquetas no se ven) | Los datos están bien. Añade `COSMOSYS_PLUGINS=tags` al fichero de entorno y `(cd "$DEPLOY" && ./scripts/compose.sh up -d --wait)`; no hace falta restaurar otra vez. |
-| Restaurada con otro commit del deploy u otra variante | No está ensayado: no la abras. Corrige el checkout o el fichero, reconstruye y arranca (paso 5.2) y restaura otra vez la misma copia. Si la instancia no arranca, destrúyela con `down -v` como en el paso 9 y créala de nuevo. |
-| Cualquier otra duda tras restaurar | Restaurar otra vez la misma copia es seguro: deja la instancia igual que la primera vez. |
+| Restaurada con otro commit del deploy u otra variante | No está ensayado: no la abras. Corrige el checkout o el fichero, reconstruye y arranca (paso 5.2) y restaura otra vez la misma copia (se pierde lo que se hiciera en la instancia después de la copia). Si la instancia no arranca, destrúyela con `down -v` como en el paso 9 y créala de nuevo. |
+| Cualquier otra duda tras restaurar | Restaurar otra vez la misma copia deja la instancia igual que la primera vez, pero se pierde todo lo que se hiciera en ella después de la copia: si ya la usan, es la vuelta atrás del paso 9, no un arreglo sin coste. |
 
 ## Si algo falla
 
@@ -874,6 +875,7 @@ Cuando haya que pedir ayuda, basta con el mensaje, el paso y, si hace falta, los
 | `Unable to find image 'snapshots_gen-converter:latest' locally` o `pull access denied for snapshots_gen-converter` | 4, 7 | La imagen del conversor no está construida en este servidor. Constrúyela con la primera orden del paso 4. |
 | `migracion/convertido already exists` | 4 | Ya hubo una conversión. Para repetirla, borra `migracion/convertido`; si ya importaste algo, empieza también de nuevo desde el paso 5. |
 | `blocking: true` (y código 1) | 4 | `report.md` tiene algo en `Blocking`, por ejemplo `tags_blocking` si el `.cstags` no es importable. No se puede seguir sin resolverlo; los títulos de `report.md` dicen qué es. |
+| `service "bootstrap" didn't complete successfully`, y en `(cd "$DEPLOY" && ./scripts/compose.sh logs bootstrap)` `cannot load such file -- /opt/cosmosys-deploy/bootstrap/apply.rb` (`LoadError`) | 5.2, o en el servidor de destino | El checkout del deploy se clonó o se actualizó con `umask 077` y el usuario `redmine` no puede leer lo que la imagen copió de él (ver la lista de comprobación de "Antes de empezar"). Dale lectura con `chmod -R go+rX "$DEPLOY"` (o vuelve a clonarlo con `umask 022`) y repite `./scripts/compose.sh build` y `./scripts/compose.sh up -d --wait`. |
 | `Set POSTGRES_PASSWORD in .env` (o la misma frase con otra variable) | 5 | Al fichero de entorno le falta esa variable, o `COSMOSYS_ENV_FILE` no está exportada en esta terminal. |
 | `COSMOSYS_ENV_FILE does not exist` | 5, 8, 9 | La variable apunta a un fichero que no existe. Revisa la ruta (absoluta). |
 | `Missing trackers (the .csys import will refuse their items): ...` | 6.1 | Falta en la instancia nueva un tracker con ítems en la antigua. Créalo (paso 5.3) y repite el 6.1. |
