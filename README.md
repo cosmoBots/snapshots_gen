@@ -17,6 +17,8 @@ Read this before running anything against a real instance. Every file the migrat
 
 Keep them in a private working directory (`umask 077`, modes 700 and 600, outside any Git checkout or synchronized folder), move them only over SSH or on an encrypted disk, never by e-mail, chat, issue or public link, and delete them when the migration is over. The procedure has a section on this ("Material sensible") with what each file holds, how to check permissions, how to move and delete them, and what to do if one ends up in the wrong place.
 
+To report a security problem, see [SECURITY.md](SECURITY.md): only through GitHub's private vulnerability reporting, and never with data from a real instance.
+
 ## Rehearsed versions
 
 The procedure was rehearsed from Redmine 4.2.10 on MySQL 5.7 (with `additionals` 3.0.5.2 and the cosmoBots fork of `additional_tags` 1.0.4) to cosmoSys 0.2.10 with cosmoSys Requirements, on Redmine 7.0.1 and PostgreSQL 16, with the `tags` plugin set of `cosmoSys_deploy` (`additionals` and `additional_tags` 4.6.0). It needs a `cosmoSys_deploy` that pins cosmoSys 0.2.10; the procedure says how to check it. Other versions have not been rehearsed: the importer relies on internal classes of cosmoSys, so another version means rehearsing on a copy first.
