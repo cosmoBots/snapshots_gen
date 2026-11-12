@@ -37,6 +37,8 @@ module SnapshotsGen
         plan_hierarchy!
         plan_data!
         plan_identities!
+        report_data_sections!
+        report_generated_items!
         plan_positions!
         plan_catalog_and_relations!
         plan_fields!
@@ -374,19 +376,40 @@ module SnapshotsGen
       end
 
       # rqVar and rqValue of requirements become datum items, under one data
-      # section per project, as cosmosys_req's own schema migration does.
+      # section per project, as cosmosys_req's own schema migration does. A
+      # variable key cosmoSys would refuse (invalid, or repeated in the tree)
+      # cannot be a datum: that requirement keeps rqVar and rqValue as custom
+      # fields (plan_fields!), like any field without a current equivalent,
+      # and so does an rqValue without rqVar. A project left without data gets
+      # no data section.
       def plan_data!
         @datum_keys = {}
         @datum_numbers = Hash.new(0)
+        @datum_sources = Set.new
         by_project = Hash.new { |hash, key| hash[key] = [] }
         @items.each_value do |item|
           next if item.synthetic? || item.profile != 'requirement'
 
           fields = values('Issue', item.source_id)
           name = Rules.clean(fields['rqVar']).to_s.strip
-          next if name.empty?
+          value = Rules.clean(fields['rqValue']).to_s
+          if name.empty?
+            unless value.strip.empty?
+              report.add('datum_field_kept', item.key, variable: nil, value: value, reason: 'rqValue without rqVar')
+            end
+            next
+          end
 
-          by_project[item.project_id] << [item, name, Rules.clean(fields['rqValue']).to_s]
+          tree_key = [root_of(item.project_id), name.downcase]
+          reason = if !name.match?(/\A[A-Za-z][A-Za-z0-9_]*\z/) then 'invalid variable key'
+                   elsif @datum_keys.key?(tree_key) then 'variable key repeated in the project tree'
+                   end
+          if reason
+            report.add('datum_field_kept', item.key, variable: name, value: value, reason: reason)
+            next
+          end
+          @datum_keys[tree_key] = true
+          by_project[item.project_id] << [item, name, value]
         end
         by_project.each do |project_id, entries|
           section = Item.new(
@@ -397,13 +420,6 @@ module SnapshotsGen
           )
           @items[section.key] = section
           entries.each do |requirement, name, value|
-            tree_key = [root_of(project_id), name.downcase]
-            if !name.match?(/\A[A-Za-z][A-Za-z0-9_]*\z/) || @datum_keys.key?(tree_key)
-              report.add('field_value_unmapped', requirement.key, field: 'rqVar', value: name,
-                                                                  reason: 'invalid or repeated variable key; kept only in the history')
-              next
-            end
-            @datum_keys[tree_key] = true
             # cosmoSys numbers user-defined identities downwards from -1 per tree.
             @datum_numbers[root_of(project_id)] -= 1
             datum = Item.new(
@@ -415,8 +431,33 @@ module SnapshotsGen
               profile_fields: { 'csys_value' => value }
             )
             @items[datum.key] = datum
+            @datum_sources << requirement.key
             report.add('datum_created', datum.key, variable: name, value: value, requirement: requirement.key)
           end
+        end
+      end
+
+      # The "Project data" chapters exist only in the new instance; once
+      # their CSID is known, the report names them.
+      def report_data_sections!
+        @items.each_value.select { |item| item.synthetic == 'data_section' }.each do |section|
+          report.add('data_section_created', section.key, project: project_identifier(section.project_id), csid: section.csid,
+                                                          data: @items.each_value.count { |item| item.parent_key == section.key })
+        end
+      end
+
+      # Every item that exists only in the new instance, with its final CSID,
+      # so a checker can tell it from a migrated item without reading this
+      # code: "Group: ..." chapters (from = the item they wrap), "Project
+      # data" chapters and their data (from = the requirement). Source items
+      # keep their identity_* entries.
+      def report_generated_items!
+        @items.each_value.select(&:synthetic?).sort_by(&:key).each do |item|
+          from = case item.synthetic
+                 when 'group', 'datum' then item.key.sub(/\Aitem:(group|datum)-/, 'item:')
+                 end
+          report.add('item_generated', item.key, kind: item.synthetic, project: project_identifier(item.project_id),
+                                                 csid: item.csid, from: from)
         end
       end
 
@@ -564,6 +605,12 @@ module SnapshotsGen
 
       public
 
+      # Whether the rqVar and rqValue of this item became a datum. When not,
+      # the item keeps them, with their history, as custom fields.
+      def datum_source?(item)
+        @datum_sources.include?(item.key)
+      end
+
       def poris_item?(item)
         item && !item.synthetic? && Rules::PORIS_TRACKERS.include?(tracker_name(item.issue['tracker_id']))
       end
@@ -640,7 +687,7 @@ module SnapshotsGen
               end
               profile_fields[native['field']] = native_value(item, name, native, value)
               native_counts[name] += 1
-            elsif Rules::DROPPED_ISSUE_FIELDS.key?(name) || Rules::DATUM_FIELDS.include?(name)
+            elsif Rules::DROPPED_ISSUE_FIELDS.key?(name) || (Rules::DATUM_FIELDS.include?(name) && datum_source?(item))
               dropped_counts[name] += 1
             elsif Rules::DOCUMENT_REFERENCE_FIELDS.key?(name)
               rest = Rules.unparsed_reference_text(value)
@@ -772,7 +819,8 @@ module SnapshotsGen
         never.each { |text| report.add('history_never_recorded', text) }
         source.content.fetch('tables').each do |table|
           name = table.fetch('name')
-          next if Rules::REDMINE_TABLES.include?(name) || Rules::COSMOSYS_TABLES.include?(name) || table.fetch('rows').zero?
+          next if Rules::REDMINE_TABLES.include?(name) || Rules::COSMOSYS_TABLES.include?(name) ||
+                  Rules::TAG_TABLES.include?(name) || table.fetch('rows').zero?
 
           report.add('plugin_data_not_migrated', name, rows: table.fetch('rows'))
         end

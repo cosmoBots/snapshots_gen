@@ -4,7 +4,11 @@
 # snapshots_gen converter: turns a legacy snapshot into
 #   - one .csys package per root project tree, for the cosmoSys import;
 #   - one history package, for the history importer;
+#   - one tags package (.cstags), for the tags importer;
 #   - a conversion report (JSON and Markdown).
+#
+# It exits 1 when the report has blocking findings, including a tags package
+# that the strict profile cannot import.
 #
 #   ruby convert.rb LEGACY.cslegacy OUT_DIR
 
@@ -17,6 +21,7 @@ require_relative 'lib/snapshots_gen/converter/plan'
 require_relative 'lib/snapshots_gen/converter/csys_builder'
 require_relative 'lib/snapshots_gen/converter/history_builder'
 require_relative 'lib/snapshots_gen/converter/csys_check'
+require_relative 'lib/snapshots_gen/converter/tags_builder'
 
 module SnapshotsGen
   module Converter
@@ -39,17 +44,27 @@ module SnapshotsGen
           manifest = builder.write(root_id, path)
           CsysCheck.new(manifest).errors.each { |error| raise Error, "#{File.basename(path)}: #{error}" }
           content = manifest.fetch('content')
-          { 'file' => File.basename(path), 'root_identifier' => identifier, 'content_sha256' => manifest.fetch('content_sha256'),
+          { 'path' => path, 'file' => File.basename(path), 'root_identifier' => identifier, 'content_sha256' => manifest.fetch('content_sha256'),
             'projects' => content.fetch('projects').map { |project| project.dig('project', 'identifier') },
             'items' => content.fetch('projects').sum { |project| project.fetch('items').length } }
         end
         history_dir = File.join(out, ".#{label}.history")
-        HistoryBuilder.new(plan, csys_packages: packages).write(history_dir)
+        history = HistoryBuilder.new(plan, csys_packages: packages.map { |package| package.except('path') })
+        history.write(history_dir)
         history_path = File.join(out, "#{label}.cshistory")
         LegacySnapshot::Writer.zip_directory(history_dir, history_path)
         FileUtils.rm_rf(history_dir)
         result = LegacySnapshot::Verifier.new(history_path).verify
         raise Error, "the history package does not verify: #{result.errors.first(5).join('; ')}" unless result.ok?
+
+        tags_path = File.join(out, "#{label}.cstags")
+        tags = TagsBuilder.new(plan, history_path: history_path, csys: packages, dropped_tag_changes: history.dropped_tag_changes).build
+        tags.write(tags_path)
+        tags_result = TagsPackage::Verifier.new(tags_path).verify(history: history_path, csys: packages.map { |package| package['path'] })
+        raise Error, "the tags package does not verify: #{tags_result.errors.first(5).join('; ')}" unless tags_result.ok?
+
+        tags.report!(report)
+        tags_counts = tags_result.manifest.dig('content', 'counts')
 
         summary = {
           'source' => File.basename(input), 'label' => label,
@@ -58,6 +73,10 @@ module SnapshotsGen
           'csys_packages' => packages.map { |package| "#{package['file']} (#{package['items']} items)" },
           'history_package' => File.basename(history_path),
           'journals' => result.manifest.dig('content', 'tables').find { |table| table['name'] == 'journals' }&.fetch('rows'),
+          'tags_package' => File.basename(tags_path),
+          'tags' => "#{tags_counts['source_tags']} tags, #{tags_counts['source_taggings']} taggings, " \
+                    "#{tags_counts['tagged_objects']} tagged objects of #{tags_counts['objects']}",
+          'tags_importable' => tags_result.manifest.dig('content', 'importable'),
           'blocking' => report.blocking?
         }
       end
