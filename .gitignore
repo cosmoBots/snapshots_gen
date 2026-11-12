@@ -22,3 +22,7 @@ etiquetas-destino.jsonl
 *.sql
 *.sql.gz
 .env
+
+# Credentials of the legacy test environment, in case SG_WORK points inside the checkout.
+database.yml
+mysql-root-password

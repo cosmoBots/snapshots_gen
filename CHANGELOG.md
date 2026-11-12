@@ -52,6 +52,6 @@ The first release. It migrates an old cosmoSys instance (Redmine 4.2 on MySQL 5.
 - No mail or notification job is queued while the importer runs. Before, Redmine queued one for each recipient of each imported item and journal, which were not sent only because of how the instance was configured.
 - The exporter does not export sessions or tokens, redacts 2FA secrets and service passwords, and writes files readable only by their owner. The comparison extracts are written with mode 600.
 - The procedure has a section on sensitive material (what each file holds, how to keep, move and delete it, and what to do if one ends up in the wrong place), and the format documents and the README point to it.
-- `.gitignore` ignores every package, report, comparison extract, database dump and environment file that a migration produces.
+- `.gitignore` ignores every package, report, comparison extract, database dump and environment file that a migration produces, and the database credentials of the legacy test environment.
 
 [Unreleased]: https://github.com/cosmoBots/snapshots_gen/commits/main
