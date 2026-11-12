@@ -2,10 +2,10 @@
 
 Migration of old cosmoSys instances (Redmine 4.2 with `cosmosys_rm`, `cosmosys_req_rm`, `cosmosys_git_rm` and, in some, `cosmosys_req_poris_rm`) to the current cosmoSys (Redmine 7, deployed with `cosmoSys_deploy`), through snapshots, with their history, their users and passwords, and their tags.
 
-**The migration procedure is written in Spanish:** [docs/procedimiento-migracion.md](docs/procedimiento-migracion.md). It is meant to be followed end to end, without help, by an administrator who knows Docker and Linux but not cosmoSys internals. Start there:
+**The migration procedure is written in Spanish:** [docs/procedimiento-migracion.md](docs/procedimiento-migracion.md). It is meant to be followed end to end, without help, by an administrator who knows Docker and Linux but not cosmoSys internals. Start there, and follow it from a released version, not from the tip of `main`:
 
 ```sh
-git clone https://github.com/cosmoBots/snapshots_gen.git
+git clone --branch v0.1.0 https://github.com/cosmoBots/snapshots_gen.git
 ```
 
 ## Data protection

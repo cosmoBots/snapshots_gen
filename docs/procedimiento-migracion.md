@@ -207,19 +207,19 @@ En cada servidor, trabaja en un directorio propio, fuera del checkout del deploy
 umask 077
 mkdir -m 700 cosmosys-migracion
 cd cosmosys-migracion
-git clone https://github.com/cosmoBots/snapshots_gen.git
+git clone --branch v0.1.0 https://github.com/cosmoBots/snapshots_gen.git
 git -C snapshots_gen rev-parse HEAD
 mkdir -m 700 migracion
 ```
 
-Usa la misma revisión de `snapshots_gen` en los dos servidores: la última orden de `git` la imprime. Si el servidor antiguo no llega a GitHub, crea en el nuevo un archivo con el código y llévalo al antiguo (el código no es sensible):
+Clona la versión publicada, la etiqueta `v0.1.0`, y no la punta de `main`: es la versión que describe este procedimiento, y desde aquí sigue el de ese checkout (`snapshots_gen/docs/procedimiento-migracion.md`). Git puede avisar de que la etiqueta no es un commit (`is not a commit!`) y de que el checkout no está en ninguna rama (`detached HEAD`): las dos cosas son lo esperado al clonar una etiqueta firmada. Usa la misma revisión de `snapshots_gen` en los dos servidores: clona la misma etiqueta en los dos y comprueba que la última orden de `git` imprime el mismo commit. Si el servidor antiguo no llega a GitHub, crea en el nuevo un archivo con el código y llévalo al antiguo (el código no es sensible):
 
 ```sh
-git -C snapshots_gen archive --format=tar.gz --prefix=snapshots_gen/ -o snapshots_gen.tar.gz HEAD   # en el servidor nuevo
-tar xzf snapshots_gen.tar.gz                                                                       # en el servidor antiguo, en su directorio de trabajo
+git -C snapshots_gen archive --format=tar.gz --prefix=snapshots_gen/ -o snapshots_gen.tar.gz v0.1.0   # en el servidor nuevo
+tar xzf snapshots_gen.tar.gz                                                                         # en el servidor antiguo, en su directorio de trabajo
 ```
 
-El archivo no lleva `.git`, así que en el servidor antiguo no se puede volver a preguntar la revisión: anota la que imprimió `git rev-parse HEAD` antes de crearlo, y comprueba que llegó entero comparando `sha256sum snapshots_gen.tar.gz` en los dos servidores.
+El archivo no lleva `.git`, así que en el servidor antiguo no se puede volver a preguntar la revisión: anota la etiqueta y el commit que imprimió `git rev-parse HEAD` antes de crearlo, y comprueba que llegó entero comparando `sha256sum snapshots_gen.tar.gz` en los dos servidores.
 
 Las órdenes usan unas variables de la terminal. En el servidor antiguo:
 
