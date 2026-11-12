@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-12
+
 The first release. It migrates an old cosmoSys instance (Redmine 4.2 on MySQL 5.7 with the `cosmosys_*` plugins) to the current cosmoSys (Redmine 7 on PostgreSQL, deployed with `cosmoSys_deploy`) with its history, its users and passwords, and its tags. Added describes the whole tool; Changed and Fixed also say what differs from the code that was on `main` before this release.
 
 ### Added
@@ -55,4 +57,5 @@ The first release. It migrates an old cosmoSys instance (Redmine 4.2 on MySQL 5.
 - The procedure has a section on sensitive material (what each file holds, how to keep, move and delete it, and what to do if one ends up in the wrong place), and the format documents and the README point to it.
 - `.gitignore` ignores every package, report, comparison extract, database dump and environment file that a migration produces, and the database credentials of the legacy test environment.
 
-[Unreleased]: https://github.com/cosmoBots/snapshots_gen/commits/main
+[Unreleased]: https://github.com/cosmoBots/snapshots_gen/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/cosmoBots/snapshots_gen/releases/tag/v0.1.0
