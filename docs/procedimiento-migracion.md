@@ -195,7 +195,7 @@ En total, del paso 1 al 7, unos 30 minutos en el ensayo, casi todos en el paquet
 - [ ] Hay espacio: en el servidor nuevo, unas cuatro veces lo que ocupan los adjuntos y la base de la instancia antigua (el paquete antiguo, los convertidos, su copia dentro del contenedor y la instancia ya importada); en el antiguo, unas dos veces. El inventario (paso 1) dice cuánto ocupan los adjuntos.
 - [ ] Sabes cómo llevarás los ficheros del servidor antiguo al nuevo (paso 3.4), si no son el mismo.
 - [ ] La ventana de congelación está acordada y los usuarios lo saben: del paso 2 al 8 nadie trabaja ni en la instancia antigua ni en la nueva.
-- [ ] Está decidido cómo se publicará la instancia nueva (paso 8.2): con el proxy del deploy, con un proxy propio o sin proxy.
+- [ ] Está decidido cómo se publicará la instancia nueva (paso 8.2): con el proxy del deploy, con un proxy propio o sin proxy; y si se abrirá en el mismo servidor en el que se migra o en otro (ver [Abrir la instancia migrada en otro servidor](#abrir-la-instancia-migrada-en-otro-servidor)).
 - [ ] Está decidido cuánto tiempo se conserva la instancia antigua parada como vuelta atrás (paso 9).
 - [ ] Has leído "Material sensible" y tu organización acepta cómo se van a guardar, llevar y borrar los ficheros.
 
@@ -628,7 +628,7 @@ Si no hay nadie con cuenta normal a mano, crea un usuario de prueba después de 
 
 ## 8. Abrir la instancia nueva
 
-En el servidor nuevo, solo cuando el paso 7 haya salido bien.
+En el servidor nuevo, solo cuando el paso 7 haya salido bien. Si la instancia se va a abrir en otro servidor, haz aquí solo el 8.1 y sigue en [Abrir la instancia migrada en otro servidor](#abrir-la-instancia-migrada-en-otro-servidor).
 
 ### 8.1. Limpiar el contenedor y hacer una copia de seguridad
 
@@ -757,6 +757,107 @@ sudo find / \( -path /proc -o -path /sys \) -prune -o \( -name '*.cslegacy' -o -
 No tiene que imprimir nada de esta migración. cosmoSys también exporta proyectos en ficheros `.csys`: si aparece alguno que no es de la migración, déjalo. La imagen `snapshots_gen-converter` y el checkout `snapshots_gen/` no llevan datos; se pueden borrar o conservar (`docker image rm snapshots_gen-converter`).
 
 `rm` no garantiza que los datos desaparezcan del disco: en discos SSD, en sistemas de ficheros con instantáneas y en las copias de seguridad del servidor pueden seguir ahí. La protección de verdad es la de "Material sensible": trabajar en un volumen cifrado y no dejar que el directorio de trabajo entre en otras copias.
+
+## Abrir la instancia migrada en otro servidor
+
+A veces quien migra no es quien opera la instancia definitiva, o el servidor definitivo no puede ejecutar la migración. Entonces los pasos 4 a 8.1 se hacen en el servidor nuevo de este procedimiento (aquí, el servidor de migración) y la instancia se abre en otro, el servidor de destino, restaurando en él la copia de seguridad del paso 8.1 con los scripts de `cosmoSys_deploy`. El servidor de destino no necesita `snapshots_gen`, ni el conversor, ni acceso a la instancia antigua: solo Docker y el deploy.
+
+Las comprobaciones de los pasos 7.2 y 7.3 se hacen en el servidor de migración, antes de la copia, porque necesitan las referencias que se tomaron en la instancia antigua (paso 3.2). En el destino no se repiten: se comprueba que la copia llegó entera, que la instancia de destino es igual que la de migración y que la restaurada funciona.
+
+### En el servidor de migración
+
+Haz los pasos 4 a 7 y el 8.1 como siempre, pero no publiques la instancia (ni 8.2 ni 8.3): se abre en el destino. La copia del 8.1 sale con el "Nombre y ruta del servidor" y el "Protocolo" de serie (`localhost:3000` y HTTP), y se ponen en el destino. Anota para quien restaure, junto a la copia:
+
+```sh
+git -C "$DEPLOY" rev-parse HEAD
+grep '^COSMOSYS_PLUGINS=' "$COSMOSYS_ENV_FILE"
+sha256sum "$COPIA/SHA256SUMS"
+```
+
+- El commit de `cosmoSys_deploy` que creó la instancia (la primera orden). El destino usa ese mismo commit.
+- Los conjuntos de plugins (la segunda orden, `tags` en lo ensayado) y la variante, `requirements`.
+- La suma de la lista de sumas de la copia (la tercera orden), para comprobar en el destino que llegó la misma.
+- El número de ítems de la instancia migrada: el total de la lista de peticiones con todos los estados (filtro "Estado: todos").
+- La contraseña de `admin` de la instancia migrada: la de su `COSMOSYS_INITIAL_ADMIN_PASSWORD`, o la que tenga si alguien la cambió. Después de restaurar, `admin` tiene esa, no la del fichero de entorno del destino. Se da por un canal distinto del de la copia.
+
+El fichero de entorno de la instancia de migración no viaja: lleva sus secretos, y el destino genera los suyos.
+
+### Preparar el servidor de destino
+
+Se puede hacer antes de la ventana de congelación. En el servidor de destino, con las variables `DEPLOY` y `COSMOSYS_ENV_FILE` de "Preparar el directorio de trabajo" (aquí, las de la instancia de destino) y la terminal en `umask 077`:
+
+```sh
+git clone https://github.com/cosmoBots/cosmoSys_deploy.git "$DEPLOY"
+git -C "$DEPLOY" -c advice.detachedHead=false checkout <commit del deploy>
+git -C "$DEPLOY" rev-parse HEAD
+```
+
+La última orden tiene que dar el commit anotado. Comprueba después su pin como en "Versiones con las que se ha ensayado".
+
+Crea el fichero de entorno como en el paso 5.1, con secretos nuevos generados en este servidor (`openssl rand`), un `COMPOSE_PROJECT_NAME` y un `COSMOSYS_SESSION_COOKIE_KEY` propios, `COSMOSYS_VARIANT=requirements` y el mismo `COSMOSYS_PLUGINS` que la instancia de migración. Diferencias con el 5.1:
+
+- `COSMOSYS_INITIAL_ADMIN_PASSWORD` solo vale para la instancia vacía: la restauración la sustituye por la de la instancia migrada. Pon igualmente una contraseña fuerte, que protege la instancia vacía mientras espera.
+- `COSMOSYS_BIND_ADDRESS` y `COSMOSYS_HTTP_PORT` según cómo se vaya a publicar (paso 8.2). Si la publicación es sin proxy en una red de confianza, la dirección de ese servidor en esa red, o `0.0.0.0` con el cortafuegos limitando el puerto. Mientras no se restaure, la instancia vacía no tiene nada que proteger salvo su `admin`.
+- `REDMINE_LANG` no influye en lo restaurado (solo en los datos de serie de la instancia vacía, que la restauración sustituye); deja `en`.
+
+Construye y arranca la instancia, y haz las comprobaciones del paso 5.2. La instancia tiene que estar arrancada y sana antes de restaurar: si no, `restore.sh` se para con `service "db" is not running` sin tocar nada. En el ensayo, `up -d --wait` tardó un minuto con la imagen ya construida; la primera construcción tarda bastante más.
+
+### Llevar la copia
+
+La copia es un directorio con cuatro ficheros (`database.dump`, `files.tar.gz`, `manifest.env` y `SHA256SUMS`) y lleva toda la base y los adjuntos: es material sensible. Llévala entera como dice "Cómo se llevan de un servidor a otro" en [Material sensible](#material-sensible), a un directorio 700 del destino, fuera del checkout del deploy. En el destino:
+
+```sh
+COPIA=<ruta absoluta del directorio de la copia>
+chmod 700 "$COPIA"; chmod 600 "$COPIA"/*
+(cd "$COPIA" && sha256sum -c SHA256SUMS)
+sha256sum "$COPIA/SHA256SUMS"
+```
+
+Los tres ficheros tienen que decir `OK`, y la última suma tiene que ser la misma que da `sha256sum` sobre el `SHA256SUMS` de la copia en el servidor de migración (así se sabe que tampoco cambió la lista de sumas). Si algo dice `FAILED`, no restaures: vuelve a llevar la copia.
+
+### Comprobar que la instancia de destino es igual antes de restaurar
+
+`restore.sh` no compara la copia con la instancia en la que restaura: restaura igualmente aunque no coincidan, y por ejemplo en una instancia sin `tags` la restauración termina bien, la instancia queda sana y las etiquetas no se ven. Compruébalo tú antes:
+
+```sh
+NUEVO=$(cd "$DEPLOY" && ./scripts/compose.sh ps -q redmine); echo "$NUEVO"
+grep -E '^(variant|cosmosys_revision|cosmosys_req_revision|plugin_sets)=' "$COPIA/manifest.env"
+docker inspect --format '{{index .Config.Labels "eu.cosmobots.cosmosys.revision"}}' "$NUEVO"
+docker inspect --format '{{index .Config.Labels "eu.cosmobots.cosmosys-req.revision"}}' "$NUEVO"
+docker exec "$NUEVO" printenv COSMOSYS_PLUGINS
+```
+
+El manifiesto tiene que decir `variant=requirements`, `cosmosys_revision` igual a la primera etiqueta (`4d9e1c7e6d3ebf97c76590162fb1b19dd29f1338`, cosmoSys 0.2.10), `cosmosys_req_revision` igual a la segunda y `plugin_sets` igual a lo que imprime la última orden (`tags`). Si algo no coincide, corrige el checkout del deploy o el fichero de entorno, vuelve a construir y arrancar (paso 5.2) y repite la comprobación antes de seguir.
+
+### Restaurar
+
+```sh
+echo "$COSMOSYS_ENV_FILE"
+(cd "$DEPLOY" && RESTORE_CONFIRMATION=ERASE_EXISTING_COSMOSYS_DATA ./scripts/restore.sh "$COPIA")
+NUEVO=$(cd "$DEPLOY" && ./scripts/compose.sh ps -q redmine); echo "$NUEVO"
+```
+
+Comprueba con el `echo` que `COSMOSYS_ENV_FILE` es el fichero de la instancia de destino: la restauración borra la base y los adjuntos de esa instancia y los sustituye por los de la copia (también los proyectos de ayuda de la instancia vacía, que vienen en la copia). `RESTORE_CONFIRMATION=ERASE_EXISTING_COSMOSYS_DATA` es la confirmación: sin ella, el script no hace nada. El script vuelve a comprobar las sumas, para Redmine, restaura y lo arranca otra vez; tiene que terminar con `Restore completed from <directorio de la copia>`. En el ensayo, con una copia de 30 MB, tardó menos de un minuto.
+
+### Después de restaurar
+
+- `admin` entra con la contraseña de la instancia migrada, no con la del fichero de entorno del destino. Cámbiala en "Mi cuenta" si quien opera el destino no debe compartirla.
+- Los usuarios entran con su usuario y su contraseña de siempre. Las sesiones abiertas antes no valen, porque cada instancia tiene su propio `REDMINE_SECRET_KEY_BASE`: todos tienen que volver a entrar.
+- Publica la instancia como en el paso 8.2, en este servidor. La copia trae el "Nombre y ruta del servidor" y el "Protocolo" de serie (`localhost:3000` y HTTP). Con el proxy del deploy, el arranque debería ponerlos solo: compruébalo en los registros de `bootstrap`, como dice el 8.2, y si no salen esas líneas, ponlos tú (no está ensayado con una copia restaurada). Con un proxy propio o sin proxy, ponlos tú en Redmine (Administración, Configuración, General): sin proxy, por ejemplo, `<dirección o nombre>:<puerto>` y HTTP. Con ellos genera Redmine los enlaces de sus exportaciones y sus correos.
+- Comprueba desde otra máquina de la red de los usuarios que `curl -sI <dirección>/login | head -n 1` responde `200`. Entra por esa dirección como `admin`, mira que la lista de ítems con todos los estados tiene el número anotado y que un ítem con etiquetas las enseña. Con una cuenta normal, como en el paso 7.4, abre un proyecto privado del que sea miembro y un ítem con etiquetas.
+- Después, el paso 8.3 en este servidor. La copia restaurada es aquí el punto al que volver (paso 9: se restaura otra vez la misma copia), y se conserva y se borra como dicen los pasos 8.1 y 10.
+- En el servidor de migración, la instancia migrada no se abre nunca. Cuando la de destino esté abierta y comprobada, destrúyela como en el paso 9 (`down -v`, comprobando antes el `echo` de su `COSMOSYS_ENV_FILE`), borra su fichero de entorno y haz allí el paso 10, conservando la copia solo mientras dure el plazo de vuelta atrás.
+
+### Si te equivocas
+
+| Qué pasó | Qué hacer |
+| --- | --- |
+| `restore.sh` sin `RESTORE_CONFIRMATION` o sin directorio | No ha tocado nada. Repite la orden completa. |
+| `service "db" is not running` | La instancia de destino no estaba arrancada. No ha tocado nada: arráncala (paso 5.2) y repite. |
+| `FAILED` en `sha256sum -c`, o `Incomplete backup` | La copia llegó mal. No se ha restaurado nada: vuelve a llevarla. |
+| Restaurada en una instancia sin `tags` (las etiquetas no se ven) | Los datos están bien. Añade `COSMOSYS_PLUGINS=tags` al fichero de entorno y `(cd "$DEPLOY" && ./scripts/compose.sh up -d --wait)`; no hace falta restaurar otra vez. |
+| Restaurada con otro commit del deploy u otra variante | No está ensayado: no la abras. Corrige el checkout o el fichero, reconstruye y arranca (paso 5.2) y restaura otra vez la misma copia. Si la instancia no arranca, destrúyela con `down -v` como en el paso 9 y créala de nuevo. |
+| Cualquier otra duda tras restaurar | Restaurar otra vez la misma copia es seguro: deja la instancia igual que la primera vez. |
 
 ## Si algo falla
 
