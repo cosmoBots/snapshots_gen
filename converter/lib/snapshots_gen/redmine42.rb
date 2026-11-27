@@ -1,5 +1,37 @@
 # frozen_string_literal: true
 
+# Parts of this file are adapted from Redmine 4.2.10:
+#   lib/redmine/wiki_formatting/markdown/formatter.rb (the Markdown renderer
+#     and the options of its Redcarpet formatter),
+#   app/helpers/application_helper.rb (LINKS_RE, MACROS_RE, catch_macros and
+#     parse_non_pre_blocks),
+#   lib/redmine/wiki_formatting.rb (AUTO_LINK_RE, auto_link!,
+#     restore_redmine_links and the NullFormatter).
+# Adapted by cosmoBots.eu on 2026-11-27, to find links in a text as that
+# version of Redmine did, outside Rails. The notice of those files follows:
+#
+#   Redmine - project management software
+#   Copyright (C) 2006-2023  Jean-Philippe Lang
+#
+#   This program is free software; you can redistribute it and/or
+#   modify it under the terms of the GNU General Public License
+#   as published by the Free Software Foundation; either version 2
+#   of the License, or (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+#
+# The adapted parts and the rest of this file are distributed, as part of
+# snapshots_gen, under the GNU General Public License, version 3 only
+# (GPL-3.0-only), as permitted by Redmine's "or later" clause: see LICENSE.
+# Copyright (C) 2026 cosmoBots.eu.
+
 require 'cgi'
 require 'strscan'
 require 'uri'
@@ -10,8 +42,9 @@ module SnapshotsGen
   # options of lib/redmine/wiki_formatting/markdown/formatter.rb), the plain
   # formatter (no formatting), macros set apart first (catch_macros), and
   # parse_redmine_links applied to the HTML outside <pre> and <code>
-  # (parse_non_pre_blocks) with its LINKS_RE. Adapted from Redmine 4.2
-  # (GPL-2.0-or-later), Copyright (C) 2006-2023 Jean-Philippe Lang.
+  # (parse_non_pre_blocks) with its LINKS_RE. Adapted from Redmine 4.2.10
+  # (GPL-2.0-or-later), Copyright (C) 2006-2023 Jean-Philippe Lang: see the
+  # notice at the top of this file.
   #
   # Only the converter and the history comparison use it: they run in the
   # converter image, which has Redcarpet. The importer does not load it.
