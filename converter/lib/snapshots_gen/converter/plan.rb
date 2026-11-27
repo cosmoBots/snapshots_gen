@@ -544,8 +544,12 @@ module SnapshotsGen
       # items fail there once the numbering reaches it.
       def check_future_numbers!
         items = @items.values.reject { |item| item.profile == 'datum' || item.csid.to_s.empty? }
-        items.group_by { |item| root_of(item.project_id) }.each_value do |tree_items|
-          tree_items.map(&:project_id).uniq.each do |project_id|
+        by_tree = items.group_by { |item| root_of(item.project_id) }
+        # Every project of the tree, also one without items: its first item
+        # takes number 1.
+        @projects.keys.group_by { |project_id| root_of(project_id) }.each do |root, project_ids|
+          tree_items = by_tree.fetch(root, [])
+          project_ids.sort.each do |project_id|
             code = project_code(project_id)
             own = ->(item) { item.csid.to_s.match(/\A(.+)-(\d+)\z/)&.then { |m| m[1].casecmp?(code) ? m[2].to_i : nil } }
             last = tree_items.select { |item| item.project_id == project_id }.filter_map(&own).max.to_i

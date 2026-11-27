@@ -59,6 +59,18 @@ class ConverterIdentitiesTest < Minitest::Test
     end
   end
 
+  # A project without items numbers its first item 1: an item of another
+  # project of the tree with its code and number 1 or more blocks too.
+  def test_empty_project_is_checked_as_well
+    with_plan(tables([[1, 'S-UB-0001']])) do |_source, plan, report|
+      assert_equal 'SUB-0001', plan.item_for_issue(1).csid
+      future = entries(report, 'identity_future_collision')
+      assert_equal [['item:1', { 'csid' => 'SUB-0001', 'project' => 'alpha-sub', 'next_number' => 1 }]],
+                   future.map { |entry| [entry['subject'], entry['detail']] }
+      assert report.blocking?
+    end
+  end
+
   def test_number_that_the_next_items_of_a_project_would_take_is_blocking
     with_plan(tables([[1, 'ALP-0001'], [1, 'ALP-0002'], [2, 'A-LP-0009'], [3, 'BET-0001']])) do |_source, plan, report|
       assert_equal 'ALP-0009', plan.item_for_issue(3).csid
