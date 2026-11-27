@@ -17,6 +17,8 @@ historial-origen.jsonl
 historial-destino.jsonl
 etiquetas-origen.jsonl
 etiquetas-destino.jsonl
+pintado-origen.jsonl
+pintado-destino.jsonl
 
 # Database dumps and local secrets.
 *.sql
