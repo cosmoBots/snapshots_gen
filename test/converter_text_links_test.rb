@@ -107,6 +107,17 @@ class ConverterTextLinksTest < Minitest::Test
     end
   end
 
+  # A kept text field keeps its format options (full formatting), so the
+  # importer creates it rendering Markdown as before.
+  def test_kept_field_definitions_carry_their_format_options
+    tables = tables('x')
+    tables['custom_fields'][1]['format_store'] = "--- !ruby/hash:ActiveSupport::HashWithIndifferentAccess\nurl_pattern: ''\ntext_formatting: full\n"
+    convert(tables, settings: MARKDOWN) do |entities, _report, _plan|
+      field = entities.fetch('custom_fields').find { |row| row['name'] == 'Notes' }
+      assert_equal({ 'text_formatting' => 'full', 'url_pattern' => '' }, field['format_store'])
+    end
+  end
+
   # Without "markdown" (Redcarpet), destinations with spaces stay.
   def test_angle_rule_only_for_redcarpet
     convert(tables('![](a b.png)')) do |_entities, report, plan|

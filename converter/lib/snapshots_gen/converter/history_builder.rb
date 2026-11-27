@@ -219,7 +219,7 @@ module SnapshotsGen
             'searchable' => field['searchable'], 'default_value' => field['default_value'],
             'description' => field['description'], 'visible' => field['visible'], 'editable' => field['editable'],
             'regexp' => field['regexp'], 'min_length' => field['min_length'], 'max_length' => field['max_length'],
-            'format_store' => field['format_store'], 'position' => field['position'],
+            'format_store' => Rules.yaml_hash(field['format_store']).sort.to_h, 'position' => field['position'],
             'computed' => field.key?('is_computed') ? field['is_computed'] : nil, 'formula' => field['formula'],
             'trackers' => Array(links[id]).filter_map { |link| @plan.mapped_tracker_name(@plan.tracker_name(link['tracker_id'])) }.uniq.sort,
             'roles' => Array(role_links[id]).filter_map { |link| role_names[link['role_id']] }.sort,

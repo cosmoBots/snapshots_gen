@@ -277,6 +277,10 @@ module SnapshotsGen
               editable: row['editable'].nil? ? true : flag(row['editable']), regexp: row['regexp'],
               min_length: row['min_length'], max_length: row['max_length']
             )
+            # The format options, such as a text field's full formatting:
+            # without them its Markdown would show as plain text.
+            stored = row['format_store']
+            field.format_store = field.format_store.to_h.merge(stored) if stored.is_a?(Hash) && stored.any?
             if field.respond_to?(:tracker_ids=)
               field.tracker_ids = Tracker.where(name: row['trackers']).pluck(:id)
             end
