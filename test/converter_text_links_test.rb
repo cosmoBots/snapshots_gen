@@ -66,7 +66,7 @@ class ConverterTextLinksTest < Minitest::Test
       item = plan.item_for_issue(1)
       # cosmoSys's rewriter would take "#2" (same .csys) in the code: it is protected.
       assert_equal "Depends on #snapshots-gen-item-2 and #snapshots-gen-item-3, not on !#99. Code `#snapshots-gen-hash-2`.\n" \
-                   '![](/attachments/download/snapshots-gen-attachment-10/a b.png) ![](/attachments/download/0/gone.png)' \
+                   '![](</attachments/download/snapshots-gen-attachment-10/a b.png>) ![](/attachments/download/0/gone.png)' \
                    "\n[the other](/issues/snapshots-gen-item-3), #snapshots-gen-item-2 and user#snapshots-gen-user-1, !user#77, " \
                    "#{HOST}/projects/beta", item.description
       assert_equal 'Because of #snapshots-gen-item-2 and #snapshots-gen-item-3', item.profile_fields['rq_rationale']
@@ -80,7 +80,7 @@ class ConverterTextLinksTest < Minitest::Test
       # never reads it) and the text field changes.
       notes = entities.fetch('journals').first['notes']
       assert_equal 'user#snapshots-gen-user-1 and !user#77 on #snapshots-gen-item-3 ' \
-                   '![](/attachments/download/snapshots-gen-attachment-10/a b.png)', notes
+                   '![](</attachments/download/snapshots-gen-attachment-10/a b.png>)', notes
       details = entities.fetch('journal_details').to_h { |row| [row['id'], row] }
       assert_equal 'Was #snapshots-gen-item-2', details.fetch(30)['old_value']
       assert_equal item.description.sub('#snapshots-gen-hash-2', '#2'), details.fetch(30)['value']
@@ -100,9 +100,21 @@ class ConverterTextLinksTest < Minitest::Test
                    rewritten.map { |entry| [entry.dig('detail', 'kind'), entry.dig('detail', 'source_id').to_s, entry.dig('detail', 'form')] }
       assert_equal [['detail #30', 11], ['item:1', 11]], codes.fetch('attachment_link_broken').map { |entry| [entry['subject'], entry.dig('detail', 'attachment')] }.sort
       assert_equal ["#{HOST}/projects/beta"], codes.fetch('old_host_link_kept').map { |entry| entry.dig('detail', 'url') }.uniq
+      assert_equal ['item:1', 'journal #20', 'detail #30'].sort, codes.fetch('link_destination_bracketed').map { |entry| entry['subject'] }.uniq.sort
       counts = codes.fetch('text_placeholders').to_h { |entry| [entry['subject'], entry.dig('detail', 'count')] }
       assert_operator counts.fetch('item'), :>, 5
       assert_equal 2, counts.fetch('literal')
+    end
+  end
+
+  # Without "markdown" (Redcarpet), destinations with spaces stay.
+  def test_angle_rule_only_for_redcarpet
+    convert(tables('![](a b.png)')) do |_entities, report, plan|
+      assert_equal '![](a b.png)', plan.item_for_issue(1).description
+      assert_empty report.entries.select { |entry| entry['code'] == 'link_destination_bracketed' }
+    end
+    convert(tables('![](a b.png)'), settings: MARKDOWN) do |_entities, _report, plan|
+      assert_equal '![](<a b.png>)', plan.item_for_issue(1).description
     end
   end
 end

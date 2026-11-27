@@ -879,9 +879,14 @@ module SnapshotsGen
         end
       end
 
-      # Code is recognized in both Markdown dialects.
+      # The angle rule is for Redcarpet ("markdown"); code is recognized in
+      # both Markdown dialects.
       def markdown_source?
         %w[markdown common_mark].include?(text_formatting)
+      end
+
+      def redcarpet_source?
+        text_formatting == 'markdown'
       end
 
       # A text of the old instance with its links rewritten
@@ -898,7 +903,7 @@ module SnapshotsGen
         rewriter = TextLinks::Rewriter.new(
           item: ->(id) { @items_by_source_id.key?(id) }, user: ->(id) { @users.key?(id) },
           attachment: ->(id) { attachment_containers.key?(id) }, host: source_host, markdown: markdown,
-          protect: protect
+          angle: markdown && redcarpet_source?, protect: protect
         )
         result, events = rewriter.rewrite(text)
         record_text_events(subject, item, events)
@@ -958,6 +963,7 @@ module SnapshotsGen
           when 'attachment_broken' then report.add('attachment_link_broken', subject, attachment: id, absolute: event['absolute'], **where)
           when 'issue_url_broken' then report.add('item_link_broken', subject, reference: id, absolute: event['absolute'], **where)
           when 'old_host_kept' then report.add('old_host_link_kept', subject, url: event['url'], **where)
+          when 'angle' then report.add('link_destination_bracketed', subject, destination: event['destination'], **where)
           end
         end
       end

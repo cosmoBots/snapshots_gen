@@ -63,6 +63,12 @@ module SnapshotsGen
     AUTOLINK = %r{<(?<url>https?://[^>\s]+)>}i.freeze
     TAG = %r{</?[A-Za-z][^<>\n]*>}.freeze
 
+    # The angle rule: a destination that CommonMark would not accept because
+    # it has spaces (Redcarpet, the "markdown" formatter of Redmine 4.2, did)
+    # is put between "<" and ">". Only a destination without a scheme, quotes,
+    # "<", ">", "[", "]", "!" or a line break, with balanced parentheses.
+    ANGLE_DESTINATION = /\A[^()<>"'\r\n\[\]!]*(?:\([^()<>"'\r\n]*\)[^()<>"'\r\n\[\]!]*)*\z/.freeze
+
     # Where code starts and ends. Indented code blocks are not recognized:
     # in a text they cannot be told from a nested list without parsing the
     # whole document.
@@ -185,12 +191,13 @@ module SnapshotsGen
     #                      text does not go through it
     # rewrite returns the new text and the events, one hash per change.
     class Rewriter
-      def initialize(item:, user:, attachment:, host:, markdown: true, protect: nil)
+      def initialize(item:, user:, attachment:, host:, markdown: true, angle: markdown, protect: nil)
         @item = item
         @user = user
         @attachment = attachment
         @host = host || Host.new('')
         @markdown = markdown
+        @angle = angle
         @protect = protect
       end
 
@@ -249,7 +256,18 @@ module SnapshotsGen
       # The inside of "(...)" of a Markdown link: destination and title.
       def rewrite_inner(inner)
         match = inner.match(/\A(?<lead>\s*)(?<dest><[^>]*>|\S+)(?<rest>.*)\z/m)
-        match ? "#{match[:lead]}#{rewrite_destination(match[:dest])}#{match[:rest]}" : inner
+        rewritten = match ? "#{match[:lead]}#{rewrite_destination(match[:dest])}#{match[:rest]}" : inner
+        angle(rewritten)
+      end
+
+      def angle(inner)
+        return inner unless @angle && inner.match?(ANGLE_DESTINATION)
+
+        destination = inner.strip
+        return inner unless destination.include?(' ') && !destination.match?(/\A[a-z][a-z0-9+.-]*:/i)
+
+        event('angle', destination: destination)
+        "<#{destination}>"
       end
 
       def rewrite_attributes(tag)

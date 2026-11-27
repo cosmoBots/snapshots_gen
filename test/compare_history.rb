@@ -29,6 +29,7 @@ module HistoryComparison
       @host = TextLinks::Host.new(host ? host['subject'] : '', host && host.dig('detail', 'protocol'))
       formatting = @entries.find { |e| e['code'] == 'text_formatting' }&.dig('detail', 'value')
       @markdown = formatting.nil? || %w[markdown common_mark].include?(formatting)
+      @angle = formatting == 'markdown'
       @failures, @unexplained, @explained = [], [], Hash.new { |h, k| h[k] = [] }
       @pairs, @ids = {}, {}
       validate!
@@ -244,7 +245,7 @@ module HistoryComparison
       rewriter = TextLinks::Rewriter.new(
         item: ->(id) { @ids.key?(id) }, user: ->(id) { !source_refs['users'][id.to_s].nil? },
         attachment: ->(id) { !target_attachments(source_refs, target_refs, id).empty? },
-        host: @host, markdown: markdown
+        host: @host, markdown: markdown, angle: markdown && @angle
       )
       converted, events = rewriter.rewrite(text)
       evidence = { 'item_neutralized' => 'reference_neutralized', 'user_neutralized' => 'user_reference_neutralized',

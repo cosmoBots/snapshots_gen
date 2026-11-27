@@ -51,6 +51,7 @@ module SnapshotsGen
         'attachment_link_broken' => ['warning', 'Links to attachments that are not migrated: they point to no attachment (id 0), never to another file'],
         'item_link_broken' => ['warning', 'Links to items of the old instance that are not migrated: they point to no item (id 0)'],
         'old_host_link_kept' => ['warning', 'Links to the old instance that are neither an attachment nor an item, left as they are (they break when it stops)'],
+        'link_destination_bracketed' => ['transformation', 'Link destinations with spaces put between < and > (Redcarpet took them, CommonMark needs the brackets)'],
         'source_host' => ['information', 'Host of the old instance (its links are rewritten)'],
         'other_references' => ['information', 'References to documents, versions, changesets or notes left as they are'],
         'ambiguous_markdown_table' => ['warning', 'Indented Markdown table headers that CommonMark shows as code'],

@@ -81,9 +81,10 @@ class TextLinksTest < Minitest::Test
   def test_attachment_urls_of_the_old_instance
     text = '![](https://old.example.test/attachments/download/7/a (1).png) [doc](https://OLD.example.test/attachments/70)'
     converted = rewrite(text)
-    assert_equal '![](/attachments/download/snapshots-gen-attachment-7/a (1).png) [doc](/attachments/snapshots-gen-attachment-70)',
+    assert_equal '![](/attachments/download/snapshots-gen-attachment-7/a (1).png) [doc](/attachments/snapshots-gen-attachment-70)'
+                   .sub('(/attachments/download/snapshots-gen-attachment-7/a (1).png)', '(</attachments/download/snapshots-gen-attachment-7/a (1).png>)'),
                  converted
-    assert_equal '![](/attachments/download/507/a (1).png) [doc](/attachments/570)', resolve(converted)
+    assert_equal '![](</attachments/download/507/a (1).png>) [doc](/attachments/570)', resolve(converted)
     # Thumbnails, relative paths and HTML attributes.
     assert_equal '<img src="/attachments/thumbnail/507/200"> [x](/attachments/download/570/x.pdf)',
                  resolve(rewrite('<img src="https://old.example.test/attachments/thumbnail/7/200"> [x](/attachments/download/70/x.pdf)'))
@@ -107,6 +108,18 @@ class TextLinksTest < Minitest::Test
     assert_equal %w[old_host_kept], events(kept)
     # Without a host, only relative paths are links into the instance.
     assert_equal 'https://old.example.test/issues/65', rewrite('https://old.example.test/issues/65', host: TL::Host.new(''))
+  end
+
+  # The angle rule (Markdown only): CommonMark refuses a destination with
+  # spaces that Redcarpet accepted.
+  def test_destinations_with_spaces
+    assert_equal '![](<image (8).png>) ![](ok.png) [a](<b c.pdf>)', rewrite('![](image (8).png) ![](ok.png) [a](b c.pdf)')
+    assert_equal %w[angle angle], events('![](image (8).png) ![](ok.png) [a](b c.pdf)')
+    # Not with a scheme, quotes, a title, an exclamation mark or a line break,
+    # and never inside code.
+    kept = "![](http://x.test/a b) ![](\"a b\") ![](a b \"t\") ![](a!b c)\n![](\n![](x.png)) `![](a b)`\n```\n![](a b)\n```\n"
+    assert_equal kept, rewrite(kept)
+    assert_equal '![](a b)', rewrite('![](a b)', markdown: false)
   end
 
   def test_code_segments

@@ -184,7 +184,7 @@ class CompareHistoryTest < Minitest::Test
                            { 'code' => 'text_formatting', 'subject' => nil, 'detail' => { 'value' => 'markdown' } }] }
     source, target = item, item(101)
     source['journals'] = [journal([], 'Asked user#20: ![](https://old.example.test/attachments/download/7/a b.png)')]
-    target['journals'] = [journal([], 'Asked user#57: ![](/attachments/download/507/a b.png)', 101)]
+    target['journals'] = [journal([], 'Asked user#57: ![](</attachments/download/507/a b.png>)', 101)]
     source['text_refs'] = { 'users' => { '20' => 'ana' }, 'attachments' => { '7' => ['a b.png', 'd1'] } }
     target['text_refs'] = { 'users' => { '57' => 'ana' }, 'attachments' => { '507' => ['a b.png', 'd1'] } }
     assert compare(source, target, host).ok?
