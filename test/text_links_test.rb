@@ -129,6 +129,16 @@ class TextLinksTest < Minitest::Test
     assert_equal "a `b` c\n```\nd\n```\ne <pre>f</pre> ``g`` `h", parts.map(&:first).join
   end
 
+  # Multibyte characters (2, 3 and 4 bytes) in and around inline code: the
+  # parts join back into the exact input, and nothing in code is rewritten.
+  def test_code_segments_with_multibyte_characters
+    ["`é` tail", "`漢字 #12` end #12", "`😀` tail", "ñ `a` ü `b` 😀"].each do |text|
+      assert_equal text, TL.segments(text).map(&:first).join
+    end
+    assert_equal "`漢字 #12` end #snapshots-gen-item-12", rewrite("`漢字 #12` end #12")
+    assert_equal "`é` tail", rewrite("`é` tail")
+  end
+
   def test_other_prefixes_are_counted_and_kept
     assert_equal 'document#3 version#4', rewrite('document#3 version#4')
     assert_equal %w[other_reference other_reference], events('document#3 version#4')

@@ -129,8 +129,10 @@ module SnapshotsGen
           if closing
             result << [plain, false] unless plain.empty?
             plain = +''
-            result << [ticks + rest[0, closing.end(0)], true]
-            scanner.pos += closing.end(0)
+            span = rest[0, closing.end(0)]
+            result << [ticks + span, true]
+            # StringScanner#pos counts bytes; MatchData#end counts characters.
+            scanner.pos += span.bytesize
           else
             plain << ticks
           end
