@@ -141,6 +141,9 @@ module SnapshotsGen
              .delete("\u0000")
       end
 
+      # The only project codes (and so CSID prefixes) cosmoSys accepts.
+      CODE_PATTERN = /\A[A-Za-z0-9]+\z/.freeze
+
       def normalize_code(code)
         code.to_s.gsub(/[^a-zA-Z0-9]/, '')
       end

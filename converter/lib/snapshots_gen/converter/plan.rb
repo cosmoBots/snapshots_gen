@@ -464,11 +464,16 @@ module SnapshotsGen
       # Identities: an old CSID is kept whenever it is unique within its
       # project tree, even when its prefix belongs to another project (the item
       # was moved): cosmoSys only requires uniqueness per tree, and people cite
-      # these identifiers. A prefix that was the project's own code with
-      # characters cosmoSys does not accept is rewritten with the normalized
-      # code. Items without a usable CSID take the next number of their project.
+      # these identifiers. A prefix cosmoSys does not accept (only letters and
+      # digits) is rewritten: with the normalized code when it was the
+      # project's own code, and with the same rule (its other characters
+      # removed) when it is the prefix of another project, so ABC-X-0007 becomes
+      # ABCX-0007 wherever the item lives. A rewritten CSID that collides with
+      # another one of its tree is blocking. Items without a usable CSID take
+      # the next number of their project.
       def plan_identities!
         used = Hash.new { |hash, key| hash[key] = Set.new }
+        owners = Hash.new { |hash, key| hash[key] = {} }
         candidates = {}
         @items.values.reject { |item| item.profile == 'datum' || item.synthetic? }.sort_by(&:source_id).each do |item|
           identifier = @cosmosys_issues.dig(item.source_id, 'identifier').to_s
@@ -477,11 +482,22 @@ module SnapshotsGen
 
           raw_code = values('Project', item.project_id)[Rules::PROJECT_CODE_FIELD].to_s
           prefix = match[1]
-          prefix = project_code(item.project_id) if !raw_code.empty? && prefix.casecmp?(raw_code)
+          if !raw_code.empty? && prefix.casecmp?(raw_code)
+            prefix = project_code(item.project_id)
+          elsif !prefix.match?(Rules::CODE_PATTERN)
+            prefix = Rules.normalize_code(prefix)
+          end
           csid = "#{prefix}-#{match[2]}"
           tree = root_of(item.project_id)
+          normalized = csid != identifier
+          other = owners[tree][csid.downcase]
+          if other && (normalized || other['normalized'])
+            report.add('identity_normalized_collision', item.key, from: identifier, to: csid, other: other['item'],
+                                                                  other_from: other['original'])
+          end
           next unless used[tree].add?(csid.downcase)
 
+          owners[tree][csid.downcase] = { 'item' => item.key, 'original' => identifier, 'normalized' => normalized }
           candidates[item.key] = { 'original' => identifier, 'csid' => csid, 'number' => match[2].to_i,
                                    'own' => prefix.casecmp?(project_code(item.project_id)) }
         end
@@ -512,6 +528,32 @@ module SnapshotsGen
 
             original = @cosmosys_issues.dig(item.source_id, 'identifier')
             report.add('identity_renumbered', item.key, from: original, to: item.csid)
+          end
+        end
+        check_future_numbers!
+      end
+
+      # cosmoSys gives a new item of a project the next number after the
+      # highest one among the project's items with its own code
+      # (ProjectMaterializationIdentity#local_maximum, then cslast_id + 1),
+      # and a CSID must be unique in the whole tree. An item of another
+      # project of the tree with that code and a higher number (a moved item,
+      # or one whose prefix lost its dashes) would make the creation of new
+      # items fail there once the numbering reaches it.
+      def check_future_numbers!
+        items = @items.values.reject { |item| item.profile == 'datum' || item.csid.to_s.empty? }
+        items.group_by { |item| root_of(item.project_id) }.each_value do |tree_items|
+          tree_items.map(&:project_id).uniq.each do |project_id|
+            code = project_code(project_id)
+            own = ->(item) { item.csid.to_s.match(/\A(.+)-(\d+)\z/)&.then { |m| m[1].casecmp?(code) ? m[2].to_i : nil } }
+            last = tree_items.select { |item| item.project_id == project_id }.filter_map(&own).max.to_i
+            tree_items.each do |item|
+              number = own.call(item)
+              next unless item.project_id != project_id && number && number > last
+
+              report.add('identity_future_collision', item.key, csid: item.csid, project: project_identifier(project_id),
+                                                               next_number: last + 1)
+            end
           end
         end
       end
