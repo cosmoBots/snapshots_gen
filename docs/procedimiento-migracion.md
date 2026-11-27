@@ -77,6 +77,20 @@ El historial sigue a los campos: un cambio antiguo de `rqLevel` se ve como cambi
 
 **Cambios de adjuntos que el ítem ya no tiene:** un cambio antiguo "Fichero añadido" o "Fichero eliminado" guarda el número del adjunto. Si ese adjunto se borró en la instancia antigua, o no llega a la nueva con ese mismo ítem (su fichero faltaba o pertenece a otro contenedor), su número no vale en la instancia nueva: allí sería otro fichero o ninguno. La conversión conserva el cambio con sus nombres de fichero y le pone el número 0, que no tiene ningún adjunto. Redmine 4.2 y Redmine 7 pintan igual un cambio cuyo adjunto ya no está en el ítem: el nombre del fichero, sin enlace. Así que se ve igual que en la instancia antigua y nunca enlaza un fichero equivocado. Cada caso queda en el informe de conversión (`history_attachment_cleared`), con el ítem, su CSID, el journal, el detalle, el número del adjunto en la instancia antigua, el lado que lo nombraba (`old` si se quitó, `new` si se añadió) y el motivo (`deleted from the source` o `not migrated with this item`). El importador escribe exactamente eso; si encuentra un adjunto que el paquete da por migrado y no está, no lo cambia por 0: descarta el cambio y lo lista en su informe, y el paso 7 lo da por fallo.
 
+**Enlaces dentro de los textos:** los números de los ítems, de los usuarios y de los adjuntos cambian de una instancia a otra, así que la conversión escribe cada enlace que nombra uno de ellos como un marcador, y el importador del historial (paso 6.3) cambia todos los marcadores por el número nuevo de una sola vez, cuando ya existen todos los registros. Vale para todos los textos donde Redmine pinta enlaces: descripciones de ítems, documentos y proyectos, notas, campos de texto (los que pasan a campos nativos del requisito y los que se quedan como campos personalizados), versiones de wiki y los valores de los cambios de esos textos en el historial, para que el último cambio siga diciendo lo mismo que el texto actual.
+
+- `#123` y `##123` (referencias a ítems) pasan a `#snapshots-gen-item-123`, también dentro del mismo paquete. No se deja la reescritura a la importación del `.csys`: la de cosmoSys 0.2.10 aplica sus sustituciones una detrás de otra sobre el mismo texto, y un número ya reescrito se puede volver a reescribir si coincide con el número antiguo de otro ítem, con lo que el enlace acaba en otro ítem. Ningún marcador casa con su patrón. Una referencia a un ítem que no se migra (borrado, o un `AD n` que pasa a documento) se escapa como `!#123` y se pinta como texto (`reference_neutralized`).
+- `user#10` pasa a `user#snapshots-gen-user-10` y se resuelve con los usuarios emparejados por login; un usuario que no existe en la instancia antigua se escapa (`user_reference_neutralized`).
+- Los enlaces a la instancia antigua (su `host_name` y su `protocol`, de sus ajustes) y las rutas relativas a `/attachments/...` y `/issues/...` pasan a rutas de la instancia nueva con marcador: una imagen `https://<antigua>/attachments/download/12/x.png` queda `/attachments/download/<número nuevo>/x.png`, también en miniaturas y en la forma sin nombre de fichero; un enlace Markdown a `https://<antigua>/issues/123` queda `/issues/<número nuevo>`, y la misma URL suelta en el texto, `#<número nuevo>` (`instance_link_rewritten`). Si el adjunto o el ítem no se migra, el enlace va al número 0, que no existe, y nunca a otro registro (`attachment_link_broken`, `item_link_broken`). Un enlace a la instancia antigua que no es a un adjunto ni a un ítem se deja como está y se avisa (`old_host_link_kept`): dejará de funcionar cuando se pare la antigua.
+- No se toca nada que no sea un enlace: el código (bloques y código en línea), los textos y destinos de los enlaces Markdown, las etiquetas HTML, las anclas, los colores, las cabeceras ni un `!#123` ya escapado. Si la importación del `.csys` fuera a reescribir uno de esos `#123` igualmente, la conversión lo protege con otro marcador y el importador lo devuelve tal cual. Los bloques de código sangrados (sin vallas) no se distinguen de una lista anidada y se tratan como texto.
+- El informe cuenta los marcadores escritos por tipo (`text_placeholders`). El importador comprueba antes de confirmar que no queda ninguno en ningún texto, y el paso 7.4 compara a qué lleva cada enlace en las dos instancias.
+
+**Markdown:** Redmine 4.2 pinta el formato `markdown` con Redcarpet y Redmine 7 con CommonMark, que lee igual casi todo. La conversión arregla lo único mecánico: un destino de enlace o de imagen con espacios, como `![](image (8).png)`, que Redcarpet aceptaba y CommonMark deja como texto, se escribe entre `<` y `>` (`link_destination_bracketed`), solo si el formato de origen es `markdown` y nunca dentro de código. El resto se pinta distinto sin perder texto y se lista en el informe por texto, con su ítem y su CSID (`markdown_dialect`), para que alguien lo revise y lo acepte o lo retoque a mano: `_texto_` era subrayado y ahora es cursiva (`underline`); una racha de guiones bajos pegada a una palabra (huecos para rellenar) se comía como énfasis y ahora sale tal cual (`underscores`); `~texto~` salía con sus tildes y ahora sale tachado (`strikethrough`); `x^2` era superíndice y ahora sale el `^` (`superscript`); una lista sangrada cuatro columnas o más bajo un elemento numerado era una lista anidada y ahora es texto (`list_indent`); una lista que cambia de `*` a `-` (o a números) era una y ahora son dos (`list_marker`); `![]("nombre")`, una imagen ya rota en la antigua, ahora es texto (`quoted_destination`); y una línea con solo `-` o `*`, que era texto, ahora es un elemento de lista vacío (`empty_list_item`).
+
+**Fórmulas:** si la instancia antigua tenía un plugin de MathJax, que pintaba `$...$`, `$$...$$`, `\(...\)`, `\[...\]` y `{{mj(...)}}` en toda la página (asuntos incluidos), la conversión no las traduce: el cosmoSys nuevo solo pinta las fórmulas de las macros de su conjunto `latex` (`{{latex(...)}}` en línea y `{{latex_block(...)}}` en bloque), y el resto se queda como texto. El informe lista cada descripción, nota, campo, versión de wiki, documento y asunto con fórmulas y cuántas tiene (`latex_formula`), para pasarlas a mano. Si se van a usar, crea la instancia con ese conjunto (paso 5.1). Al pasarlas: el argumento de una macro no puede tener saltos de línea, termina en el primer `)}}` (sepáralo con un espacio si la fórmula lo contiene) y Redmine lo parte por las comas y la macro lo vuelve a unir sin los espacios de alrededor.
+
+**Adjuntos de proyecto:** los ficheros del módulo Archivos (adjuntos de un proyecto o de una de sus versiones) no caben en el `.csys`: viajan en el `.cshistory`, con su fichero, y el paso 6.3 los crea en su proyecto o en su versión, con su autor, su fecha, su descripción y su contador de descargas, y comprueba su SHA-256 (`project_file_migrated`). El módulo Archivos queda activo o no como estaba. Los adjuntos que no pertenecen a nada (subidas que nunca se llegaron a adjuntar, que Redmine solo borra si alguien pasa su limpieza, o adjuntos de un registro que ya no existe) no se migran, y el informe los lista (`attachment_without_container`).
+
 **Etiquetas:** la conversión las deja en `<nombre>.cstags` tal como están en la instancia antigua, sin tocar ningún nombre: no quita espacios, no cambia mayúsculas ni acentos y no parte en las comas (`A,B` es una sola etiqueta; `A` y `a` son dos). Los ítems se identifican por su proyecto y su CSID final (el renumerado, si lo fue) y las páginas de wiki por su proyecto y su título. El orden de las etiquetas de cada ítem no se conserva: el plugin nuevo siempre las muestra por nombre. El plugin nuevo no tiene contexto ni autor de cada etiquetado, así que solo se pueden importar los etiquetados de contexto `tags` sin autor; cualquier otro caso, igual que un nombre que el plugin nuevo cambiaría (espacios al principio o al final, más de 255 caracteres), una etiqueta repetida, un ítem `AD n`/`RD n`/`CD n` etiquetado o con cambios de etiquetas en su historial (esos ítems pasan a documentos y su historial no se migra, así que el cambio se perdería), deja el `.cstags` como no importable y el informe lo cuenta en `Blocking`. Los cambios de etiquetas del historial se conservan literalmente. El formato está en [cstags-format.md](cstags-format.md).
 
 **Personas:** los usuarios se emparejan por login. Si ya existían en la instancia nueva (como `admin`), conservan su contraseña y toman el nombre de origen. Si no, se crean con su contraseña de siempre. El asignado de cada ítem llega con el historial (paso 6.3), porque Redmine solo deja asignar a miembros del proyecto.
@@ -93,6 +107,7 @@ Los ficheros que genera este procedimiento son una copia de la instancia y se tr
 | `migracion/exportado/<nombre>-<fecha>.cslegacy` | paso 3 | Toda la base de la instancia antigua salvo las sesiones y los tokens: usuarios con su contraseña cifrada y su sal, correos, notas (también las privadas), wiki, consultas, preferencias, y los ficheros adjuntos. Los secretos del 2FA y las contraseñas de servicios van borrados. |
 | `migracion/historial-origen.jsonl`, `migracion/historial-destino.jsonl` | pasos 3 y 7 | El texto de todo el historial de cada ítem, notas privadas incluidas, con los valores completos. |
 | `migracion/etiquetas-origen.jsonl`, `migracion/etiquetas-destino.jsonl` | pasos 3 y 7 | Los nombres de todas las etiquetas, los proyectos y CSID de los ítems y los títulos de las páginas de wiki. |
+| `migracion/pintado-origen.jsonl`, `migracion/pintado-destino.jsonl` | pasos 3 y 7 | El texto visible de cada descripción, nota, campo de texto, versión de wiki y documento, los logins de los usuarios enlazados y los nombres de los ficheros adjuntos con su SHA-256. |
 | `migracion/convertido/<nombre>-<identificador>.csys` | paso 4 | Todo el contenido de un proyecto raíz y de sus subproyectos: ítems, wiki, documentos y adjuntos. |
 | `migracion/convertido/<nombre>.cshistory` | paso 4 | Los usuarios con su contraseña cifrada, su sal y su correo, y todo el historial: notas (también las privadas), cambios, versiones de wiki, tiempo dedicado y observadores. |
 | `migracion/convertido/<nombre>.cstags` | paso 4 | Los nombres de las etiquetas, a qué ítems y páginas van, los ajustes del plugin y los permisos de etiquetas de cada rol. |
@@ -249,6 +264,7 @@ Copia en el contenedor el código que usan los pasos 1 a 3 y pasa el inventario:
 docker exec -u 0 "$ANTIGUO" mkdir -p /tmp/snapshots_gen-code
 docker cp snapshots_gen/exporter "$ANTIGUO":/tmp/snapshots_gen-code/exporter
 docker cp snapshots_gen/test/history_text.rb "$ANTIGUO":/tmp/snapshots_gen-code/history_text.rb
+docker cp snapshots_gen/test/render_text.rb "$ANTIGUO":/tmp/snapshots_gen-code/render_text.rb
 docker cp snapshots_gen/test/tags "$ANTIGUO":/tmp/snapshots_gen-code/tags
 docker exec -u 0 "$ANTIGUO" chown -R redmine:redmine /tmp/snapshots_gen-code
 docker exec -u redmine -w /usr/src/redmine "$ANTIGUO" \
@@ -309,20 +325,23 @@ Package written to /tmp/snapshots_gen-out/exportado/<nombre>-<fecha>.cslegacy (.
 
 ### 3.2. Tomar las referencias para comprobar
 
-El paso 7 compara la instancia nueva con la antigua: el historial de cada ítem y las etiquetas. Como la antigua ya está congelada, sus referencias se toman ahora y viajan con el paquete, y así el paso 7 se hace entero en el servidor nuevo:
+El paso 7 compara la instancia nueva con la antigua: el historial de cada ítem, las etiquetas y cómo se pinta cada texto. Como la antigua ya está congelada, sus referencias se toman ahora y viajan con el paquete, y así el paso 7 se hace entero en el servidor nuevo:
 
 ```sh
 docker exec -u redmine -w /usr/src/redmine "$ANTIGUO" \
   bundle exec rails runner -e production /tmp/snapshots_gen-code/history_text.rb /tmp/snapshots_gen-out/historial-origen.jsonl es
 docker exec -u redmine -w /usr/src/redmine "$ANTIGUO" \
   bundle exec rails runner -e production /tmp/snapshots_gen-code/tags/extract_source.rb /tmp/snapshots_gen-out/etiquetas-origen.jsonl
+docker exec -u redmine -w /usr/src/redmine "$ANTIGUO" \
+  bundle exec rails runner -e production /tmp/snapshots_gen-code/render_text.rb /tmp/snapshots_gen-out/pintado-origen.jsonl
 docker cp "$ANTIGUO":/tmp/snapshots_gen-out/historial-origen.jsonl migracion/
 docker cp "$ANTIGUO":/tmp/snapshots_gen-out/etiquetas-origen.jsonl migracion/
+docker cp "$ANTIGUO":/tmp/snapshots_gen-out/pintado-origen.jsonl migracion/
 chmod -R go-rwx migracion
 find migracion -perm /077
 ```
 
-La primera dice `wrote /tmp/snapshots_gen-out/historial-origen.jsonl` y la segunda `tags evidence: objects=N tags=N assignments=N`. El `es` es el idioma en el que se pinta el historial: el paso 7 usa el mismo.
+La primera dice `wrote /tmp/snapshots_gen-out/historial-origen.jsonl`, la segunda `tags evidence: objects=N tags=N assignments=N` y la tercera `wrote /tmp/snapshots_gen-out/pintado-origen.jsonl`. El `es` es el idioma en el que se pinta el historial: el paso 7 usa el mismo. Las tres leen dentro de una transacción de solo lectura; la tercera pinta cada texto como lo enseña Redmine y calcula el SHA-256 de cada fichero adjunto, así que con muchos adjuntos tarda un poco más.
 
 ### 3.3. Limpiar el contenedor antiguo
 
@@ -379,7 +398,7 @@ Deja en `migracion/convertido/`:
 **Lee el informe antes de seguir.** `report.md` está ordenado por gravedad:
 
 - `Blocking`: no se puede seguir. La orden termina con código 1. Un `.cstags` no importable también es `Blocking` (`tags_blocking`, con el número de casos por código); el `.cstags` se escribe igualmente, para diagnosticarlo.
-- `Warning`: algo se pierde o se adapta y conviene saberlo: adjuntos sin fichero, referencias `#id` a ítems que no existen, cambios del historial que no se pueden traducir o que solo nombraban registros borrados, tablas Markdown ambiguas. En `tags_warning`, lo que hay que revisar de las etiquetas antes de entregar: etiquetas desactivadas en los ajustes, etiquetas sin uso (el plugin nuevo las borra tras cualquier edición), nombres que solo difieren en mayúsculas (`case_variant_names`: la primera edición normal de un ítem que tenga las dos las funde en una), nombres con coma (`comma_in_name`: se importan como una sola etiqueta, pero la primera edición normal del ítem la parte en varias por la coma) o dos etiquetas del mismo grupo `grupo::` en un ítem (`scoped_tag_conflict`: el plugin nuevo no deja guardar ese ítem hasta quitar una). La importación las deja exactas; el problema aparece al usarlas después. Si alguno de estos recuentos no es 0, decide antes de entregar si se renombran en la instancia antigua (y se vuelve a exportar) o se aceptan.
+- `Warning`: algo se pierde o se adapta y conviene saberlo: adjuntos sin fichero o sin contenedor, referencias `#id` o `user#id` a ítems o usuarios que no existen, enlaces a adjuntos o ítems que no se migran o a otras páginas de la instancia antigua, textos que CommonMark pinta distinto (`markdown_dialect`) y fórmulas de MathJax (`latex_formula`), que hay que revisar a mano, cambios del historial que no se pueden traducir o que solo nombraban registros borrados, tablas Markdown ambiguas. En `tags_warning`, lo que hay que revisar de las etiquetas antes de entregar: etiquetas desactivadas en los ajustes, etiquetas sin uso (el plugin nuevo las borra tras cualquier edición), nombres que solo difieren en mayúsculas (`case_variant_names`: la primera edición normal de un ítem que tenga las dos las funde en una), nombres con coma (`comma_in_name`: se importan como una sola etiqueta, pero la primera edición normal del ítem la parte en varias por la coma) o dos etiquetas del mismo grupo `grupo::` en un ítem (`scoped_tag_conflict`: el plugin nuevo no deja guardar ese ítem hasta quitar una). La importación las deja exactas; el problema aparece al usarlas después. Si alguno de estos recuentos no es 0, decide antes de entregar si se renombran en la instancia antigua (y se vuelve a exportar) o se aceptan.
 - `Transformation`: lo que la conversión cambia a propósito, por ejemplo los estados `rqDraft` a `Draft`, los campos `rq*` a los campos nativos, los ítems `AD n`/`RD n`/`CD n` a documentos, los CSID renumerados, el lado vacío de un cambio del historial que nombraba un registro borrado o los cambios de adjuntos que el ítem ya no tiene, que se quedan con sus nombres de fichero y sin adjunto.
 - `Information`: lo que no se puede recuperar porque nunca se guardó, los usuarios cuyo 2FA se reinicia y los roles de las membresías.
 
@@ -413,7 +432,7 @@ REDMINE_LANG=en
 
 - `COMPOSE_PROJECT_NAME` da nombre a los contenedores y a los volúmenes de la instancia (`<proyecto>-redmine-1`, `<proyecto>_database`...): letras minúsculas, números, `_` o `-`, y distinto del de cualquier otra instancia del servidor.
 - `COSMOSYS_VARIANT=requirements` añade cosmoSys Requirements, que hace falta si la instancia antigua tenía requisitos (tracker `rq`), que es lo normal.
-- `COSMOSYS_PLUGINS=tags` es obligatorio: instala los plugins de etiquetas. Sin él, el paso 6.4 se niega a importarlas (`the tag plugin is not ready in this instance`). Otros conjuntos del deploy se pueden activar después con `scripts/update-instance.sh --plugins` (ver su README); la migración solo se ha ensayado con `tags`.
+- `COSMOSYS_PLUGINS=tags` es obligatorio: instala los plugins de etiquetas. Si la instancia antigua tenía fórmulas de MathJax (paso 4, `latex_formula`) y se van a pasar a las macros del conjunto `latex`, usa `COSMOSYS_PLUGINS=tags,latex` y añade `COSMOSYS_TOOLS=mathtext` y la imagen con esa herramienta (`COSMOSYS_REQ_IMAGE=` lo que imprima `(cd "$DEPLOY" && ./scripts/image-tag.sh requirements mathtext)`); la instancia del servidor de destino tiene que llevar los mismos conjuntos. Sin él, el paso 6.4 se niega a importarlas (`the tag plugin is not ready in this instance`). Otros conjuntos del deploy se pueden activar después con `scripts/update-instance.sh --plugins` (ver su README); la migración solo se ha ensayado con `tags`.
 - `COSMOSYS_BIND_ADDRESS=127.0.0.1` deja la instancia cerrada mientras se migra. El paso 8.2 la cambia según cómo se publique.
 - `COSMOSYS_SESSION_COOKIE_KEY` con un nombre propio evita que el navegador mezcle la sesión de esta instancia con la de la antigua o la de otra instancia en el mismo nombre de host.
 - `REDMINE_LANG=en`, como viene en `.env.example`, es lo ensayado. Con otro idioma, Redmine crea sus trackers, estados y roles de serie con los nombres traducidos, y el reparto de roles del paso 6 (`rqWriter` a `Developer`...) no los encuentra. Cada usuario elige luego su idioma en "Mi cuenta", y el idioma por defecto se cambia en Administración, Configuración, Visualización.
@@ -467,12 +486,13 @@ docker cp snapshots_gen/exporter "$NUEVO":/tmp/sg/exporter
 docker cp snapshots_gen/importer "$NUEVO":/tmp/sg/importer
 docker cp snapshots_gen/converter "$NUEVO":/tmp/sg/converter
 docker cp snapshots_gen/test/history_text.rb "$NUEVO":/tmp/sg/history_text.rb
+docker cp snapshots_gen/test/render_text.rb "$NUEVO":/tmp/sg/render_text.rb
 docker cp snapshots_gen/test/tags "$NUEVO":/tmp/sg/tags
 for f in migracion/convertido/*.csys migracion/convertido/*.cshistory migracion/convertido/*.cstags; do docker cp "$f" "$NUEVO":/tmp/sg/pkg/; done
 docker exec -u 0 "$NUEVO" chown -R redmine:redmine /tmp/sg
 ```
 
-`/tmp/sg/pkg` tiene que quedar con todos los `.csys`, el `.cshistory` y el `.cstags` de la misma conversión y con ningún otro: el paso 6.4 comprueba que son exactamente los que se convirtieron juntos. El directorio `converter` hace falta porque en él está el lector del `.cstags`, y `history_text.rb` y `tags` son para el paso 7. El `chown` es por lo mismo que en el paso 1.
+`/tmp/sg/pkg` tiene que quedar con todos los `.csys`, el `.cshistory` y el `.cstags` de la misma conversión y con ningún otro: el paso 6.4 comprueba que son exactamente los que se convirtieron juntos. El directorio `converter` hace falta porque en él está el lector del `.cstags`, y `history_text.rb`, `render_text.rb` y `tags` son para el paso 7. El importador usa además `converter/lib/snapshots_gen/text_links.rb`, el mismo código que escribe los marcadores de los enlaces en la conversión. El `chown` es por lo mismo que en el paso 1.
 
 Para no repetir la orden larga, define:
 
@@ -524,6 +544,8 @@ importar history /tmp/sg/pkg/"$NOMBRE".cshistory
 
 Al terminar de escribir el historial, y si la versión de cosmoSys las tiene, captura las líneas base de presentación de los ítems consolidados (por ejemplo, los requisitos que ya no están en borrador): son el texto aprobado con el que cosmoSys compara después, y sin ellas el ítem se lee "falta evidencia". La instancia antigua no las tenía, así que se toman del contenido migrado ya completo, como hace el script `scripts/capture_approved_presentation_baselines.rb` de cosmoSys con los ítems anteriores a esa función. Por eso el paso 6.2 no las captura, aunque la interfaz sí lo hace al importar un paquete: las referencias y relaciones entre paquetes no están completas hasta este paso.
 
+En la misma transacción crea los ficheros del módulo Archivos (adjuntos de proyecto) que lleva el paquete y cambia cada marcador de enlace (ver "Qué cambia en la conversión") por el número nuevo, en las notas, los cambios y la wiki que escribe y en los textos que dejó el paso 6.2 (descripciones, campos de texto, documentos y proyectos).
+
 Todo ocurre en una sola transacción: o queda todo importado y verificado, o no queda nada. Al final dice cuántos journals, versiones de wiki, entradas de tiempo, observadores y membresías ha escrito, y deja un informe en `/tmp/sg/pkg/history-import-<fecha>.json` con lo que no pudo traducir. Lo que la conversión ya quitó está en su informe y no llega al importador, así que cualquier cosa que el importador descarte es algo que el informe de conversión no anunciaba: la última línea lo dice (`Dropped by the importer: none` o un `WARNING: the importer dropped N records that the conversion report does not announce`). En el JSON (formato `snapshots_gen-history-import-v1`), `dropped` lista cada registro con `kind`, `id` (en el origen) y `reason`, y los journals y cambios llevan además `journal` (el journal de origen), `item` y `csid` (el CSID del ítem en la instancia nueva); `dropped_counts` los cuenta por tipo. El informe se copia al final del paso 6.4.
 
 **6.4. Importar las etiquetas**, también primero en ensayo (escribe todo, lo verifica y lo deshace):
@@ -568,7 +590,7 @@ Antes de confirmar la transacción del historial, el importador verifica que:
 - los journals y los cambios escritos son los esperados;
 - ninguna nota sale como "Editada" y sus números siguen el orden de las fechas;
 - ningún cambio nombra un estado, tracker, usuario, versión, categoría, proyecto, ítem o adjunto que no exista (un cambio de adjunto con el número 0 es el que anuncia `history_attachment_cleared`), y ningún adjunto es de otro ítem;
-- no queda ninguna referencia sin traducir;
+- no queda ningún marcador de enlace sin resolver en ningún texto;
 - ningún cambio del historial sale como "Translation missing", en inglés y en castellano.
 
 Y el de etiquetas, antes de confirmar la suya, que cada ítem y cada página tiene exactamente las etiquetas del paquete. Además, todas las órdenes del paso 6 tienen que haber dicho `Jobs queued: none`.
@@ -616,13 +638,40 @@ docker run --rm -v "$PWD:/work" snapshots_gen-converter \
 
 La extracción dice `tags evidence: objects=N tags=N assignments=N`. La comparación enseña `Tags: N source, N target` y `Assignments: N source, N target` con los mismos números a los dos lados, `order: not-certified` (el orden de las etiquetas no se conserva, como se dijo) y tiene que terminar en `Failures (0)`, con código 0. Compara cada nombre byte a byte, sin recortar espacios ni cambiar mayúsculas, cada etiqueta de cada ítem y de cada página, sus fechas, los ajustes del plugin y los contadores. Devuelve 1 si hay diferencias y 2 si una de las dos capturas no es válida. Por defecto no enseña nombres de etiquetas, solo huellas; `--show-names` los enseña y su salida es material sensible.
 
-No comprueba quién ve las etiquetas: eso es el 7.4.
+No comprueba quién ve las etiquetas: eso es el 7.5.
 
-### 7.4. Revisar a mano
+### 7.4. Comparar cómo se pintan los textos
+
+Pinta cada texto de la instancia nueva (descripciones, notas, campos de texto, versiones de wiki, documentos y descripciones de proyecto) como lo enseña Redmine y lo compara con la referencia del paso 3.2, junto con el SHA-256 de cada fichero adjunto:
+
+```sh
+docker exec -u redmine -w /usr/src/redmine "$NUEVO" bundle exec rails runner /tmp/sg/render_text.rb /tmp/sg/pintado-destino.jsonl
+docker cp "$NUEVO":/tmp/sg/pintado-destino.jsonl migracion/
+chmod -R go-rwx migracion
+find migracion -perm /077
+docker run --rm -v "$PWD:/work" snapshots_gen-converter \
+  ruby snapshots_gen/test/compare_render.rb migracion/pintado-origen.jsonl migracion/pintado-destino.jsonl migracion/convertido/report.json
+```
+
+La extracción dice `wrote /tmp/sg/pintado-destino.jsonl` (no sobrescribe: si el fichero ya existe, bórralo dentro del contenedor). La comparación empieza con `Texts: N in the source, N in the target, N compared`, sigue con lo que no compara porque el informe de conversión lo explica (`Not compared, as the report says:`, por ejemplo las descripciones de los ítems `AD n` que pasan a documento) y tiene que terminar en `Unexplained differences (0)` y `Failures (0)`, con código 0 (1 si no, 2 si no puede leer las entradas). Es un fallo:
+
+- que un texto de la instancia nueva conserve un marcador de enlace;
+- que un enlace o una imagen apunte a la instancia antigua;
+- que un texto enseñe menos imágenes que en la antigua, o otro fichero (las que ya estaban rotas en la antigua no cuentan);
+- que un enlace a un ítem, a un usuario o a un adjunto lleve a otro que en la antigua (los ítems se emparejan por su proyecto y su CSID, con los cambios de CSID del informe; los usuarios, por login; los adjuntos, por nombre y SHA-256 del fichero), o desaparezca sin la entrada del informe que lo anuncia (`reference_neutralized`, `attachment_link_broken`...);
+- que un adjunto de la instancia nueva no tenga en la antigua uno con el mismo nombre y el mismo SHA-256, o que falte uno de la antigua sin que el informe diga por qué (`attachment_missing`, `attachment_without_container`);
+- que un texto de la antigua no tenga pareja en la nueva sin que el informe lo explique.
+
+Un texto que se pinta distinto por otra cosa (otras etiquetas HTML u otro texto visible, sin contar los números de los ítems enlazados) se da por explicado si el informe de conversión lo anuncia para ese texto (`markdown_dialect`, `instance_link_rewritten`, una referencia escapada...), y si no, cuenta en `Unexplained differences`. `Explained differences` agrupa los explicados por entrada del informe; `--details` enseña todas las diferencias sin explicar. Los textos de `markdown_dialect` y `latex_formula` hay que revisarlos además a mano en la instancia nueva (paso 7.5): la comparación solo comprueba que están anunciados.
+
+Los dos JSONL llevan el texto visible de todo: son material sensible.
+
+### 7.5. Revisar a mano
 
 Entra por el túnel SSH del paso 5.2 (`http://localhost:8080`):
 
 - Como `admin`, abre dos o tres ítems con historial, la wiki de un proyecto y un proyecto privado. El historial tiene que leerse como en la instancia antigua, con sus autores y fechas.
+- Abre algunos de los textos que el informe de conversión lista en `markdown_dialect` y `latex_formula`, y un ítem con imágenes o enlaces a la instancia antigua (`instance_link_rewritten`): las imágenes tienen que verse y los enlaces llevar a la instancia nueva.
 - Con una cuenta normal, sin permisos de administrador y con su contraseña de siempre (por ejemplo, la de un compañero que esté contigo), abre un proyecto en el que sea miembro y un ítem con etiquetas: tiene que ver las etiquetas y, en el historial, los cambios de etiquetas. Si no los ve, a su rol le falta el permiso `view_issue_tags`: mira la línea `Roles:` y los avisos del paso 6.4.
 
 Si no hay nadie con cuenta normal a mano, crea un usuario de prueba después de 7.2 y 7.3, hazlo miembro de un proyecto con etiquetas con el rol que tienen la mayoría (`Developer` o `Reporter`), compruébalo y bórralo al terminar (Administración, Usuarios).
@@ -901,4 +950,6 @@ Cuando haya que pedir ayuda, basta con el mensaje, el paso y, si hace falta, los
 | `regenerate both extracts with history_text.rb v2` | 7.2 | La referencia del paso 3.2 se tomó con otra revisión de `snapshots_gen`. Usa la misma en los dos servidores y vuelve a tomar la referencia (la instancia antigua sigue congelada). |
 | `use a real import report, not a dry run` | 7.2 | `INFORME` apunta al informe del ensayo. Vuelve a definirlo con la orden del paso 7.2. |
 | `Failures (N)` o `Unexplained differences (N)` distintos de 0 | 7.2 | No abras la instancia. Mira el detalle en privado con `--details` o `--show CSID` y pide ayuda con los recuentos de cada grupo, sin el texto de los ítems. |
+| `verification failed, nothing was written` con `texts still hold link placeholders` | 6.3 | Algún texto conserva un marcador de enlace después de resolverlos. No se ha escrito nada; pide ayuda con la lista de tablas y recuentos que da el mensaje. |
+| `Failures (N)` o `Unexplained differences (N)` distintos de 0 | 7.4 | No abras la instancia. Cada línea dice el tipo de texto, el proyecto y el CSID o el título y qué no cuadra (imágenes, un enlace, un marcador, un adjunto). Revísalo en las dos instancias y pide ayuda con esas líneas, sin el texto de los ítems. |
 | `Failures (N)` distinto de 0 | 7.3 | No abras la instancia. Cada línea empieza por el tipo de diferencia (por ejemplo, `object_coverage`) y lleva huellas, no nombres: pide ayuda con esas líneas. |

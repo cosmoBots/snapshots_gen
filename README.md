@@ -31,7 +31,9 @@ The tool has three pieces, each of which knows only one side:
 - `converter/`: runs with a current Ruby, outside both instances. It turns a legacy snapshot into a `.csys` package per root project that the cosmoSys import accepts, a history package, a tags package (`.cstags`) and a conversion report.
 - `importer/`: runs inside the new instance with `rails runner`. Before the `.csys` import it creates users with their passwords, groups and custom fields; it runs the `.csys` import with the cosmoSys preflight; after it, before anyone works there, it writes the history (notes, changes, wiki versions, time entries and watchers) and restores the original authors and dates; and last it writes the tags, exactly as they were, into the tag plugin of the new instance, and gives each role the tag permissions its old role had. No notification is queued or sent while it runs.
 
-`test/history_text.rb` with `test/compare_history.rb`, and `test/tags/`, compare the history and the tags of the new instance with those of the old one; the procedure runs them before the new instance is opened.
+Links inside the texts (to items, users and attachments, and to the old instance itself) are written by the converter as placeholders that the importer resolves with the new ids in one pass (`converter/lib/snapshots_gen/text_links.rb`). The conversion report lists, per text, what the new instance renders differently and someone has to review: Markdown that Redcarpet and CommonMark read differently, and formulas of a MathJax plugin.
+
+`test/history_text.rb` with `test/compare_history.rb`, `test/tags/`, and `test/render_text.rb` with `test/compare_render.rb` compare the history, the tags and the rendering of every text (images, link targets and the SHA-256 of every attachment) of the new instance with those of the old one; the procedure runs them before the new instance is opened.
 
 The legacy snapshot format is specified in [docs/legacy-snapshot-format.md](docs/legacy-snapshot-format.md) and the tags package in [docs/cstags-format.md](docs/cstags-format.md).
 
@@ -43,6 +45,8 @@ The three pieces work end to end on a synthetic old instance and on a copy of a 
 - The order of the tags of an item is not kept: the new tag plugin always sorts them by name.
 - The new tag plugin splits names with a comma, merges names that differ only in case and deletes unused tags when an item is edited after the migration. The import keeps them exact; the inventory and the conversion report count those cases so that they can be dealt with before migrating.
 - Two-factor authentication is reset, and users of external authentication (LDAP) need a password from an administrator.
+- Formulas of the old MathJax plugin are not translated, and some Markdown renders differently in CommonMark (underlines, single tildes, superscripts, some lists); the conversion report lists every case for review.
+- Attachments that belong to nothing (uploads never attached) are not migrated; the report lists them.
 
 ## Tests
 
