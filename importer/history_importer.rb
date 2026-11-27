@@ -76,6 +76,16 @@ module SnapshotsGen
       def csys_packages
         manifest.dig('content', 'csys_packages') || []
       end
+
+      # A file the package carries (the files of the Files module).
+      def asset_path(digest)
+        raise Error, "invalid SHA-256 #{digest.inspect}" unless digest.to_s.match?(/\A[0-9a-f]{64}\z/)
+
+        path = File.join(@directory, 'assets', 'sha256', digest)
+        raise Error, "the history package does not carry the file #{digest}" unless File.file?(path)
+
+        path
+      end
     end
 
     # The three steps of the import in the new instance.
@@ -125,6 +135,7 @@ module SnapshotsGen
           resolve_documents!
           resolve_wiki_pages!
           resolve_attachments!
+          import_project_files!
           import_journals!
           import_wiki_versions!
           import_time_entries!
@@ -479,6 +490,8 @@ module SnapshotsGen
           by_container[[row['container'], row['container_key']]] << row
         end
         by_container.each do |(type, key), rows|
+          next if %w[project version].include?(type)
+
           container_type, container_id = case type
                                          when 'item' then ['Issue', @item_map.fetch(key)]
                                          when 'document' then ['Document', @document_map.fetch(key)]
@@ -493,6 +506,33 @@ module SnapshotsGen
 
             @attachment_map[row['id']] = attachment.id
           end
+        end
+      end
+
+      # The files of the Files module, of a project or of one of its
+      # versions: the .csys cannot carry them, so they travel in the history
+      # package and are created here, in the same order as in the source.
+      # Their author, date, description and downloads are restored with the
+      # other attachments (restore_containers!).
+      def import_project_files!
+        rows = @package.rows('attachments').select { |row| row['migrated'] && %w[project version].include?(row['container']) }
+        rows.sort_by { |row| [row['container'], row['container_key'].to_i, row['ordinal']] }.each do |row|
+          container = if row['container'] == 'project'
+                        Project.find(@project_map.fetch(row['container_key'].to_i))
+                      else
+                        Version.find(@version_map.fetch(row['container_key'].to_i) { raise Error, "version #{row['container_key']} was not imported" })
+                      end
+          attachment = File.open(@package.asset_path(row['sha256']), 'rb') do |file|
+            Attachment.create!(container: container, author: User.find_by(id: user_id(row['author_id'])) || User.anonymous,
+                               file: file, filename: row['filename'], content_type: row['content_type'],
+                               description: row['description'])
+          end
+          unless attachment.digest == row['sha256'] && attachment.filesize == row['bytes'].to_i
+            raise Error, "file #{row['id']} (#{row['filename']}) changed on its way into the new instance"
+          end
+
+          @attachment_map[row['id']] = attachment.id
+          @stats['project_files'] += 1
         end
       end
 

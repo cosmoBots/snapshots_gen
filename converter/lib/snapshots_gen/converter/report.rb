@@ -44,6 +44,8 @@ module SnapshotsGen
         'relations_on_close' => ['information', 'Relations kept by erased or zombie requirements'],
         'relations_on_close_unparsed' => ['warning', 'Stored relations of erased requirements that could not be read'],
         'attachment_missing' => ['warning', 'Attachments without file in the source'],
+        'attachment_without_container' => ['warning', 'Attachments that belong to nothing (uploads never attached, or of a record no longer in the source): not migrated'],
+        'project_file_migrated' => ['transformation', 'Files of the Files module (of a project or of a version), created by the history importer'],
         'reference_neutralized' => ['warning', 'Item references (#id) to items that are not migrated, escaped'],
         'user_reference_neutralized' => ['warning', 'User references (user#id) to users that are not in the source, escaped'],
         'text_placeholders' => ['information', 'Links to items, users and attachments written as placeholders that the history importer resolves with the new ids (literal: "#id" that is not a reference, kept from the cosmoSys import as it was)'],

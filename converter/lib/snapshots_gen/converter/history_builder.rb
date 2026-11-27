@@ -39,6 +39,13 @@ module SnapshotsGen
 
       def write(directory)
         writer = LegacySnapshot::Writer.new(directory, schema: LegacySnapshot::HISTORY_SCHEMA)
+        # The files of the Files module travel in this package: the .csys has
+        # no place for them.
+        writer.write_asset_index(@plan.project_files.keys.sort.map do |id|
+          index = @source.asset_index.fetch(id)
+          digest, bytes = writer.add_asset(@source.asset_path(index.fetch('sha256')))
+          { 'attachment_id' => id, 'sha256' => digest, 'bytes' => bytes, 'status' => 'present' }
+        end)
         entities.each do |name, rows|
           columns = rows.flat_map(&:keys).uniq.sort
           columns = ['id'] if columns.empty?
@@ -258,7 +265,8 @@ module SnapshotsGen
             'id' => row['id'], 'container' => container&.first, 'container_key' => container && container[1],
             'ordinal' => container && container[2], 'filename' => row['filename'], 'sha256' => index['sha256'],
             'author_id' => row['author_id'], 'created_on' => row['created_on'], 'description' => row['description'],
-            'downloads' => row['downloads'], 'migrated' => !container.nil?
+            'downloads' => row['downloads'], 'migrated' => !container.nil?, 'content_type' => row['content_type'],
+            'bytes' => index['bytes']
           }
         end
       end

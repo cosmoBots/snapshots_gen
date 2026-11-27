@@ -859,7 +859,26 @@ module SnapshotsGen
         source.table('wiki_pages').each do |page|
           attachments_of('WikiPage', page['id']).each_with_index { |id, index| containers[id] = ['wiki_page', page['id'], index] }
         end
+        project_files.each { |id, (type, key, index)| containers[id] = [type, key, index] }
         @attachment_containers = containers
+      end
+
+      # Files of the Files module: attachments of a project, or of one of its
+      # versions. The .csys has no place for them; the history importer
+      # creates them. { id => ['project' | 'version', source id, ordinal] }
+      def project_files
+        @project_files ||= begin
+          files = {}
+          @projects.each_key do |project_id|
+            attachments_of('Project', project_id).each_with_index { |id, index| files[id] = ['project', project_id, index] }
+          end
+          @versions.each_key do |version_id|
+            next unless @projects.key?(@versions[version_id]['project_id'])
+
+            attachments_of('Version', version_id).each_with_index { |id, index| files[id] = ['version', version_id, index] }
+          end
+          files
+        end
       end
 
       def project_description(project_id)
@@ -989,10 +1008,33 @@ module SnapshotsGen
           report.add('unsupported_content', table, rows: rows) if rows.positive?
         end
         attachments = source.table('attachments').group_by { |row| row['container_type'] }
-        %w[Project Version News Message].each do |type|
+        %w[News Message].each do |type|
           next unless attachments[type]
 
           report.add('unsupported_content', "attachments of #{type}", rows: attachments[type].length)
+        end
+        project_files.each do |id, (type, key, _index)|
+          project_id = type == 'project' ? key : @versions.fetch(key)['project_id']
+          report.add('project_file_migrated', "attachment ##{id}", project: project_identifier(project_id),
+                                                                   version: type == 'version' ? @versions.fetch(key)['name'] : nil)
+        end
+        report_attachments_without_container!
+      end
+
+      # Attachments that belong to nothing (uploads never attached: Redmine
+      # deletes them only when someone runs its cleanup) or to a record that
+      # is no longer in the source. Nothing shows them; they are not migrated.
+      def report_attachments_without_container!
+        known = { 'Issue' => @issues, 'Document' => by_id('documents'), 'WikiPage' => by_id('wiki_pages'),
+                  'Project' => @projects, 'Version' => @versions, 'News' => by_id('news'), 'Message' => by_id('messages') }
+        source.table('attachments').sort_by { |row| row['id'] }.each do |row|
+          type = row['container_type'].to_s
+          reason = if type.empty? || row['container_id'].nil? then 'no container'
+                   elsif known.key?(type) && !known[type].key?(row['container_id']) then "#{type} ##{row['container_id']} is not in the source"
+                   end
+          next unless reason
+
+          report.add('attachment_without_container', "attachment ##{row['id']}", reason: reason, filename: row['filename'])
         end
       end
     end
