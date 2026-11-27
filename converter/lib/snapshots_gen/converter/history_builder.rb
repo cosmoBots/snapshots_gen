@@ -301,6 +301,7 @@ module SnapshotsGen
             next
           end
           @details.concat(details)
+          @plan.check_text(notes, "journal ##{journal['id']}", item)
           {
             'id' => journal['id'], 'item_key' => item.key, 'user_id' => journal['user_id'],
             'notes' => references(notes, "journal ##{journal['id']}", item), 'private_notes' => journal['private_notes'],
@@ -484,7 +485,8 @@ module SnapshotsGen
             'protected' => row['protected'], 'current_version' => content['version'],
             'current_author_id' => content['author_id'], 'current_comments' => content['comments'],
             'current_updated_on' => content['updated_on'],
-            'current_text' => references(Rules.clean(content['text']), "wiki page ##{row['id']}")
+            'current_text' => references(Rules.clean(content['text']).tap { |text| @plan.check_text(text, "wiki page ##{row['id']}", nil) },
+                                         "wiki page ##{row['id']}")
           }
         end
       end
@@ -500,7 +502,8 @@ module SnapshotsGen
           {
             'id' => row['id'], 'page_id' => row['page_id'], 'version' => row['version'], 'author_id' => row['author_id'],
             'comments' => Rules.clean(row['comments']), 'updated_on' => row['updated_on'],
-            'text' => references(Rules.clean(decompress(row)), "wiki version ##{row['id']}")
+            'text' => references(Rules.clean(decompress(row)).tap { |text| @plan.check_text(text, "wiki version ##{row['id']}", nil) },
+                                 "wiki version ##{row['id']}")
           }
         end
       end

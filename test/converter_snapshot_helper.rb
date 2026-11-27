@@ -41,7 +41,7 @@ module ConverterSnapshotHelper
   end
 
   # attachment_files: ids of attachment rows whose file the package carries.
-  def legacy(directory, tables, attachment_files: [], settings: { 'text_formatting' => 'common_mark' })
+  def legacy(directory, tables, attachment_files: [], settings: { 'text_formatting' => 'common_mark' }, plugins: [])
     writer = LS::Writer.new(directory)
     tables.each do |name, rows|
       names = rows.flat_map(&:keys).uniq
@@ -68,7 +68,7 @@ module ConverterSnapshotHelper
       end)
     end
     writer.write_report_rows('redactions', [])
-    writer.write_report_document('inventory', { 'plugins' => [] })
+    writer.write_report_document('inventory', { 'plugins' => plugins })
     writer.finish!(captured_at: TIME, generator: { 'name' => 'test', 'version' => '0' },
                    source: { 'label' => 'test', 'redmine_version' => '4.2.10', 'settings' => settings },
                    consistency: { 'mode' => 'none' })

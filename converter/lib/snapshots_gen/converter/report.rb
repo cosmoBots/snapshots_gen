@@ -57,6 +57,8 @@ module SnapshotsGen
         'source_host' => ['information', 'Host of the old instance (its links are rewritten)'],
         'other_references' => ['information', 'References to documents, versions, changesets or notes left as they are'],
         'ambiguous_markdown_table' => ['warning', 'Indented Markdown table headers that CommonMark shows as code'],
+        'markdown_dialect' => ['warning', 'Texts that CommonMark shows differently from Redcarpet, nothing lost (underline: _x_ now italics; underscores: runs shown as written; strikethrough: ~x~ now struck; superscript: x^2 now literal; list_indent: an over-indented nested list now text; list_marker: a list changing from * to - or to numbers now two lists; quoted_destination: ![]("name"), a broken image, now text; empty_list_item: a line with only - or * now an empty list item)'],
+        'latex_formula' => ['warning', 'Texts and subjects with formulas of the old MathJax plugin ($...$, $$...$$, \\(...\\), \\[...\\], {{mj(...)}}): plain text in the new instance until they are rewritten by hand'],
         'text_formatting' => ['information', 'Text formatting of the source'],
         'textile_source' => ['blocking', 'Textile content needs a conversion that this version does not do'],
         'history_detail_dropped' => ['warning', 'History details that cannot be translated'],

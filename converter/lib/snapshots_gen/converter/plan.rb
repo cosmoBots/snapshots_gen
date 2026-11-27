@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'rules'
 require_relative '../text_links'
+require_relative 'text_checks'
 
 module SnapshotsGen
   module Converter
@@ -812,6 +813,20 @@ module SnapshotsGen
       def plan_references!
         source_host
         @items.each_value do |item|
+          next if item.synthetic?
+
+          check_text(item.description, item.key, item)
+          check_text(item.subject, "#{item.key} subject", item, dialect: false)
+          (item.profile_fields || {}).each do |field, value|
+            check_text(value, "#{item.key} #{field}", item) if Rules::TEXT_NATIVE_FIELDS.include?(field) && value.is_a?(String)
+          end
+          Array(item.custom_fields).each do |entry|
+            check_text(entry['value'], "#{item.key} #{entry['name']}", item) if entry['format'] == 'text' && entry['value'].is_a?(String)
+          end
+        end
+        @documents.each_value { |document| check_text(document.description, document.key, nil) }
+        @projects.each_value { |row| check_text(Rules.clean(row['description']).to_s, "project:#{row['id']}", nil) }
+        @items.each_value do |item|
           root = root_of(item.project_id)
           item.description = rewrite_text(item.description, item.key, item: item, protect_root: root)
           item.profile_fields = (item.profile_fields || {}).to_h do |field, value|
@@ -950,6 +965,33 @@ module SnapshotsGen
 
       def text_counts
         @text_counts
+      end
+
+      # Reports what a rendered text of the source will show differently
+      # (TextChecks): Markdown dialect, only when the source used Redcarpet,
+      # and formulas, only when it had a MathJax plugin. Run on the source
+      # text, before any rewriting.
+      def check_text(text, subject, item, dialect: true)
+        return if text.to_s.strip.empty?
+
+        where = item ? { item: item.key, csid: item.csid, project: project_identifier(item.project_id) } : {}
+        if dialect && redcarpet_source?
+          kinds = TextChecks.dialect_differences(text)
+          report.add('markdown_dialect', subject, kinds: kinds, **where) if kinds.any?
+        end
+        return unless mathjax_plugin
+
+        formulas = TextChecks.latex_formulas(text)
+        report.add('latex_formula', subject, **formulas.transform_keys(&:to_sym), plugin: mathjax_plugin, **where) if formulas.any?
+      end
+
+      # The MathJax plugin of the source, if it had one: its formulas
+      # ($...$, $$...$$...) are plain text in the new instance.
+      def mathjax_plugin
+        return @mathjax_plugin if defined?(@mathjax_plugin)
+
+        plugin = Array(source.inventory['plugins']).find { |entry| "#{entry['id']} #{entry['name']}".match?(/mathjax|latex/i) }
+        @mathjax_plugin = plugin && plugin['id']
       end
 
       # One entry per kind of placeholder written, after the history builder
