@@ -290,6 +290,7 @@ module SnapshotsGen
             @stats['created_custom_fields'] += 1
             say "Created custom field #{row['name']} (#{klass}, #{row['field_format']})#{row['computed'] ? ', its formula is not kept' : ''}"
           else
+            check_field_format!(field, row)
             if field.respond_to?(:tracker_ids=)
               missing = Tracker.where(name: row['trackers']).pluck(:id) - field.tracker_ids
               field.update!(tracker_ids: field.tracker_ids + missing) if missing.any?
@@ -298,6 +299,25 @@ module SnapshotsGen
           end
           @field_map[row['id']] = field.id
         end
+      end
+
+      # Options that decide how a value renders. A field that already exists
+      # with other ones (made by an earlier version of this importer, or by
+      # hand) would show the migrated values differently: refused, since the
+      # import always goes into a new instance.
+      RENDERING_OPTIONS = %w[text_formatting url_pattern].freeze
+
+      def check_field_format!(field, row)
+        stored = row['format_store']
+        return unless stored.is_a?(Hash)
+
+        current = field.format_store.to_h.transform_keys(&:to_s)
+        different = RENDERING_OPTIONS.select { |key| stored.key?(key) && current[key].to_s != stored[key].to_s }
+        return if different.empty?
+
+        raise Error, "custom field #{field.name} already exists with other options (" +
+                     different.map { |key| "#{key}: #{current[key].inspect} here, #{stored[key].inspect} in the package" }.join('; ') +
+                     '); the history import expects a new instance'
       end
 
       def ensure_activities!
