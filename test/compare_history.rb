@@ -5,6 +5,7 @@
 require 'json'
 require 'optparse'
 require_relative '../converter/lib/snapshots_gen/converter/rules'
+require_relative '../converter/lib/snapshots_gen/text_links'
 
 module HistoryComparison
   Rules = SnapshotsGen::Converter::Rules
@@ -13,7 +14,7 @@ module HistoryComparison
     'assigned_to_id' => 'users', 'author_id' => 'users', 'category_id' => 'categories',
     'fixed_version_id' => 'versions', 'project_id' => 'projects', 'parent_id' => 'items'
   }.freeze
-  REFERENCE_PATTERN = /(?<![A-Za-z0-9_!&-])#(\d+)(?![A-Za-z0-9_-])/.freeze
+  TextLinks = SnapshotsGen::TextLinks
 
   class Comparison
     attr_reader :failures, :unexplained, :explained
@@ -22,6 +23,12 @@ module HistoryComparison
       @source, @target = source, target
       @entries = report.fetch('entries', [])
       @history = history
+      # The links of notes and text changes are rewritten as the converter
+      # did (SnapshotsGen::TextLinks), with the host and formatting it read.
+      host = @entries.find { |e| e['code'] == 'source_host' }
+      @host = TextLinks::Host.new(host ? host['subject'] : '', host && host.dig('detail', 'protocol'))
+      formatting = @entries.find { |e| e['code'] == 'text_formatting' }&.dig('detail', 'value')
+      @markdown = formatting.nil? || %w[markdown common_mark].include?(formatting)
       @failures, @unexplained, @explained = [], [], Hash.new { |h, k| h[k] = [] }
       @pairs, @ids = {}, {}
       validate!
@@ -213,31 +220,82 @@ module HistoryComparison
 
         where = "#{context} journal ##{before['id']}"
         %w[at by by_login private].each { |key| @failures << "#{where}: #{key} differs" unless before[key] == after[key] }
-        expected_notes = references(before['notes'], "journal ##{before['id']}")
+        expected_notes = references(before['notes'], "journal ##{before['id']}", old, new, after['notes'])
         if expected_notes != after['notes']
           @failures << "#{where}: notes differ (including item reference identity)"
         elsif before['notes'] != after['notes']
-          explain('item references [HistoryBuilder#references + identity mapping]', where)
+          explain('links [TextLinks via HistoryBuilder#references + identity mapping]', where)
         end
         compare_details(old, new, before, after, where)
       end
     end
 
-    def references(text, subject)
+    # The text the converter and the importer must have written: the source
+    # text rewritten by the converter's own code, with each placeholder
+    # replaced by the identity it must have in the target: the paired item,
+    # the target user with the same login, the target attachment with the
+    # same file name and SHA-256 (the one the actual text uses when several
+    # qualify). A reference the converter escaped needs its report entry.
+    def references(text, subject, old = nil, new = nil, actual = nil, markdown: @markdown)
       return text unless text.is_a?(String)
 
-      text.gsub(REFERENCE_PATTERN) do |token|
-        id = Regexp.last_match(1).to_i
-        if @ids.key?(id)
-          "##{@ids[id]}"
-        elsif entry('reference_neutralized') { |e| e['subject'] == subject && e.dig('detail', 'reference') == id }
-          "!##{id}"
-        else
-          message = "#{subject}: source reference ##{id} has neither a mapped identity nor reference_neutralized evidence"
-          @unexplained << message unless @unexplained.include?(message)
-          token
-        end
+      source_refs = refs(old)
+      target_refs = refs(new)
+      rewriter = TextLinks::Rewriter.new(
+        item: ->(id) { @ids.key?(id) }, user: ->(id) { !source_refs['users'][id.to_s].nil? },
+        attachment: ->(id) { !target_attachments(source_refs, target_refs, id).empty? },
+        host: @host, markdown: markdown
+      )
+      converted, events = rewriter.rewrite(text)
+      evidence = { 'item_neutralized' => 'reference_neutralized', 'user_neutralized' => 'user_reference_neutralized',
+                   'attachment_broken' => 'attachment_link_broken', 'issue_url_broken' => 'item_link_broken' }
+      events.each do |event|
+        code = evidence[event['kind']]
+        next unless code
+
+        key = code == 'attachment_link_broken' ? 'attachment' : 'reference'
+        next if entry(code) { |e| e['subject'] == subject && e.dig('detail', key) == event['id'] }
+
+        message = "#{subject}: #{event['kind'].tr('_', ' ')} #{event['id']} has neither a mapped identity nor #{code} evidence"
+        @unexplained << message unless @unexplained.include?(message)
       end
+      TextLinks::Resolver.new(
+        item: ->(id) { @ids[id] },
+        user: lambda do |id|
+          login = source_refs['users'][id.to_s]
+          candidates = target_refs['users'].select { |_target, value| value == login }.keys
+          candidates.find { |candidate| actual.to_s.include?("user##{candidate}") } || candidates.first
+        end,
+        attachment: lambda do |id|
+          candidates = target_attachments(source_refs, target_refs, id)
+          candidates.find { |candidate| actual.to_s.match?(%r{/attachments/(?:download/|thumbnail/)?#{candidate}(?!\d)}) } || candidates.first
+        end
+      ).resolve(converted)
+    end
+
+    # Users and attachments named in the texts of an item's history, as
+    # history_text.rb resolved them in each instance.
+    def refs(row)
+      found = row && row['text_refs']
+      { 'users' => (found && found['users']) || {}, 'attachments' => (found && found['attachments']) || {} }
+    end
+
+    def target_attachments(source_refs, target_refs, id)
+      identity = source_refs['attachments'][id.to_s]
+      return [] if identity.nil?
+
+      target_refs['attachments'].select { |_target, value| value == identity }.keys
+    end
+
+    # Text values of a change that the converter rewrites like the current
+    # text: native text fields, and kept text and string fields.
+    def text_change?(detail)
+      return false unless detail['property'] == 'cf'
+
+      native = Rules::NATIVE_ISSUE_FIELDS[detail['field']]
+      return Rules::TEXT_NATIVE_FIELDS.include?(native['field']) if native
+
+      %w[text string].include?(detail['field_format'])
     end
 
     def reference_evidence(old, detail, journal_id, code)
@@ -291,7 +349,7 @@ module HistoryComparison
       [detail['property'], detail['field'], custom_definition, detail['old_value'], detail['value'], detail['old_ref'], detail['value_ref']]
     end
 
-    def expected_detail(detail, new, cleared = nil, attachment = nil)
+    def expected_detail(detail, old, new, actual = nil, cleared = nil, attachment = nil)
       result = detail.dup
       reasons = []
       if attachment
@@ -312,7 +370,11 @@ module HistoryComparison
         result['property'], result['field'] = 'attr', native.fetch('field')
         %w[old_value value].each do |side|
           value = detail[side]
-          result[side] = native['map'] && !value.nil? ? native['map'].fetch(value.to_s, value) : value
+          result[side] = if text_change?(detail)
+                           references(value, "detail ##{detail['id']}", old, new, actual && actual[side])
+                         else
+                           native['map'] && !value.nil? ? native['map'].fetch(value.to_s, value) : value
+                         end
         end
         reasons << "native field #{detail['field']} -> #{result['field']} [Rules::NATIVE_ISSUE_FIELDS; HistoryBuilder#translate_custom_field_detail]"
       end
@@ -345,8 +407,14 @@ module HistoryComparison
           result[side] = nil if result[side == 'old_value' ? 'old_ref' : 'value_ref'].is_a?(Hash)
         end
       elsif detail['property'] == 'attr' && detail['prop_key'] == 'description'
-        %w[old_value value].each { |side| result[side] = references(detail[side], "detail ##{detail['id']}") }
-        reasons << 'description references [HistoryBuilder#references]' if result != detail
+        %w[old_value value].each { |side| result[side] = references(detail[side], "detail ##{detail['id']}", old, new, actual && actual[side]) }
+        reasons << 'description links [TextLinks via HistoryBuilder#references]' if result != detail
+      elsif text_change?(detail)
+        markdown = detail['field_format'] == 'text' && @markdown
+        %w[old_value value].each do |side|
+          result[side] = references(detail[side], "detail ##{detail['id']}", old, new, actual && actual[side], markdown: markdown)
+        end
+        reasons << 'text field links [TextLinks via HistoryBuilder#translate_custom_field_detail]' if result != detail
       end
       [result, reasons]
     end
@@ -368,8 +436,18 @@ module HistoryComparison
         end
         cleared = reference_evidence(old, detail, before['id'], 'history_reference_cleared')
         attachment = attachment_evidence(old, detail, before['id'])
-        expected, reasons = expected_detail(detail, new, cleared, attachment)
+        expected, reasons = expected_detail(detail, old, new, nil, cleared, attachment)
         index = remaining.index { |candidate| signature(actual_detail(candidate)) == signature(expected) }
+        # Several target users or attachments can qualify for one link (same
+        # login, same file): the candidate's own text says which one it used.
+        remaining.each_with_index do |candidate, position|
+          break if index
+
+          hinted, hinted_reasons = expected_detail(detail, old, new, candidate, cleared, attachment)
+          next unless signature(actual_detail(candidate)) == signature(hinted)
+
+          expected, reasons, index = hinted, hinted_reasons, position
+        end
         unless index
           @failures << "#{where} detail ##{detail['id']}: missing or changed #{detail['property']}/#{detail['field']}"
           next

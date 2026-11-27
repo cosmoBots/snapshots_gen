@@ -73,6 +73,10 @@ module SnapshotsGen
         'csWload' => { 'field' => 'cs_wload', 'requirement' => false }
       }.freeze
 
+      # Native profile fields that hold formatted text: their links are
+      # rewritten like a description's.
+      TEXT_NATIVE_FIELDS = %w[rq_rationale rq_srcs rq_compl_justif rq_verif_description].freeze
+
       DROPPED_ISSUE_FIELDS = {
         'csID' => 'copy of the old internal identifier; the item keeps it as its native CSID',
         'csChapter' => 'copy of the old chapter number; the current cosmoSys computes chapters',

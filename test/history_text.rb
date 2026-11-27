@@ -37,6 +37,14 @@ refs = {
 principal_model = defined?(Principal) ? Principal : User
 refs['assigned_to_id'] = ['users', principal_model]
 cache = {}
+principal_identity = lambda do |id|
+  principal = principal_model.find_by(id: id)
+  if principal.nil? then nil
+  elsif defined?(AnonymousUser) && principal.is_a?(AnonymousUser) then '(anonymous)'
+  elsif principal.respond_to?(:type) && principal.type == 'Group' then "(group) #{principal.lastname}"
+  else principal.login.to_s
+  end
+end
 resolve = lambda do |kind, model, value|
   next value if value.nil? || value.to_s.empty?
 
@@ -136,6 +144,23 @@ end
           'details' => renderer.details_to_strings(journal.details, true), 'raw_details' => raw
         }
       end
+      # Users and attachments that the notes and changed values name by id,
+      # with what identifies them across instances: the login (or the kind
+      # of principal) and the file name with its digest. The comparison needs
+      # them to check that a migrated link names the same one.
+      texts = issue.journals.flat_map { |journal| [journal.notes] + journal.details.flat_map { |detail| [detail.old_value, detail.value] } }
+      text_refs = { 'users' => {}, 'attachments' => {} }
+      texts.compact.each do |text|
+        text.to_s.scan(/(?<![!\w])user#(\d+)/) do |(id)|
+          text_refs['users'][id] ||= principal_identity.call(id)
+        end
+        text.to_s.scan(%r{/attachments/(?:download/|thumbnail/)?(\d+)}) do |(id)|
+          next if id == '0'
+
+          attachment = Attachment.find_by(id: id)
+          text_refs['attachments'][id] ||= attachment && [attachment.filename, attachment.digest]
+        end
+      end
       watchers = issue.watcher_users
       file.puts JSON.generate(
         'format' => 'history-text-v2', 'language' => language, 'id' => issue.id,
@@ -147,7 +172,8 @@ end
         'created' => stamp.call(issue.created_on), 'updated' => stamp.call(issue.updated_on),
         'closed' => stamp.call(issue.closed_on), 'watchers' => watchers.map(&:name).sort,
         'watcher_logins' => watchers.map(&:login).sort,
-        'time' => TimeEntry.where(issue_id: issue.id).sum(:hours).to_f, 'journals' => journals
+        'time' => TimeEntry.where(issue_id: issue.id).sum(:hours).to_f, 'journals' => journals,
+        'text_refs' => text_refs
       )
     end
   end

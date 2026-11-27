@@ -5,12 +5,12 @@ require 'set'
 require 'tmpdir'
 require 'zip'
 require_relative '../exporter/legacy_snapshot_format'
+require_relative '../converter/lib/snapshots_gen/text_links'
 
 module SnapshotsGen
   module Importer
     class Error < StandardError; end
 
-    PLACEHOLDER = /#snapshots-gen-item-(\d+)/.freeze
     DEFAULT_ROLE_MAP = {
       'rqMngr' => 'Manager', 'rqWriter' => 'Developer', 'rqReviewer' => 'Developer', 'rqReader' => 'Reporter'
     }.freeze
@@ -134,7 +134,7 @@ module SnapshotsGen
           restore_containers!
           restore_projects!
           import_deferred_values!
-          replace_description_placeholders!
+          replace_text_placeholders!
           capture_presentation_baselines!
           problems = verify!
           raise Error, "verification failed, nothing was written:\n#{problems.join("\n")}" if problems.any?
@@ -599,13 +599,16 @@ module SnapshotsGen
         row && model.where(name: row['name']).pick(:id)
       end
 
+      # Every placeholder of the converter (SnapshotsGen::TextLinks) with the
+      # id of the new instance, in one pass: items by their source id,
+      # principals with the user map (deleted users and the anonymous user
+      # become the anonymous user), attachments with the attachment map.
       def placeholders(text)
         return text if text.nil?
 
-        text.to_s.gsub(PLACEHOLDER) do
-          id = item_id_for_source(Regexp.last_match(1))
-          id ? "##{id}" : "!##{Regexp.last_match(1)}"
-        end
+        @resolver ||= TextLinks::Resolver.new(item: ->(id) { item_id_for_source(id) }, user: ->(id) { user_id(id) },
+                                              attachment: ->(id) { @attachment_map[id] })
+        @resolver.resolve(text.to_s)
       end
 
       # --- wiki, time entries, watchers and relations -------------------------
@@ -778,10 +781,37 @@ module SnapshotsGen
         end
       end
 
-      def replace_description_placeholders!
-        Issue.where(id: @item_map.values).where('description LIKE ?', '%#snapshots-gen-item-%').find_each do |issue|
-          Issue.where(id: issue.id).update_all(description: placeholders(issue.description))
+      # The texts the .csys import wrote with placeholders: descriptions and
+      # native text fields of the items, their custom values, documents and
+      # project descriptions. The history (notes, changes, wiki) was written
+      # already resolved.
+      def replace_text_placeholders!
+        columns = %w[description] + (Issue.column_names & TEXT_COLUMNS)
+        resolve_column(Issue.where(id: @item_map.values), columns)
+        resolve_column(CustomValue.where(customized_type: 'Issue', customized_id: @item_map.values), %w[value])
+        resolve_column(Document.where(project_id: @project_map.values), %w[description])
+        resolve_column(Project.where(id: @project_map.values), %w[description])
+        resolve_column(WikiContent.where(page_id: @page_map.values), %w[text])
+      end
+
+      # Native text fields of cosmoSys Requirements that the converter fills
+      # (Rules::TEXT_NATIVE_FIELDS).
+      TEXT_COLUMNS = %w[rq_rationale rq_srcs rq_compl_justif rq_verif_description].freeze
+
+      def resolve_column(scope, columns)
+        columns.each do |column|
+          scope.where(placeholder_condition(scope.model.arel_table[column])).pluck(:id, column).each do |id, text|
+            resolved = placeholders(text)
+            next if resolved == text
+
+            scope.model.where(id: id).update_all(column => resolved)
+            @stats['texts_resolved'] += 1
+          end
         end
+      end
+
+      def placeholder_condition(attribute)
+        TextLinks::LEFTOVER_LIKE.map { |pattern| attribute.matches(pattern) }.inject(:or)
       end
 
       # cosmoSys keeps, for each consolidated item (a requirement past draft),
@@ -838,12 +868,9 @@ module SnapshotsGen
         end
         relation_ids = details.where(property: 'relation').pluck(:old_value, :value).flatten.compact.map(&:to_i).uniq
         problems << 'relation details name missing items' unless (relation_ids - Issue.where(id: relation_ids).pluck(:id)).empty?
-        leftovers = journals.where('notes LIKE ?', '%#snapshots-gen-item-%').count +
-                    details.where.not(property: 'attr', prop_key: 'tag_list')
-                           .where('old_value LIKE :mark OR value LIKE :mark', mark: '%#snapshots-gen-item-%').count +
-                    Issue.where(id: @item_map.values).where('description LIKE ?', '%#snapshots-gen-item-%').count +
-                    WikiContent.where(page_id: @page_map.values).where('text LIKE ?', '%#snapshots-gen-item-%').count
-        problems << "#{leftovers} texts still hold reference placeholders" if leftovers.positive?
+        leftovers = leftover_placeholders(journals, details)
+        problems << "#{leftovers.sum { |_where, count| count }} texts still hold link placeholders: " \
+                    "#{leftovers.map { |where, count| "#{where} #{count}" }.join(', ')}" if leftovers.any?
         unready = Array(@baseline_items).reject do |issue|
           Cosmosys::ApprovedPresentationBaseline.inspect(issue.reload, user: User.current).status == :consistent
         end
@@ -860,6 +887,31 @@ module SnapshotsGen
         @stats['unlabelled_native_fields'] = product_gaps.length
         say "Verified #{journals.count} journals and #{details.count} details; #{@dropped.length} records dropped (listed in the report)."
         problems
+      end
+
+      # Texts that still hold a placeholder, by table and column. A tag list
+      # is literal (a tag may be named like a placeholder).
+      def leftover_placeholders(journals, details)
+        details = details.where.not(property: 'attr', prop_key: 'tag_list')
+        checks = {
+          'journals.notes' => [journals, 'notes'],
+          'journal_details.old_value' => [details, 'old_value'], 'journal_details.value' => [details, 'value'],
+          'wiki_contents.text' => [WikiContent.where(page_id: @page_map.values), 'text'],
+          'custom_values.value' => [CustomValue.where(customized_type: 'Issue', customized_id: @item_map.values), 'value'],
+          'documents.description' => [Document.where(project_id: @project_map.values), 'description'],
+          'projects.description' => [Project.where(id: @project_map.values), 'description']
+        }
+        (%w[description] + (Issue.column_names & TEXT_COLUMNS)).each do |column|
+          checks["issues.#{column}"] = [Issue.where(id: @item_map.values), column]
+        end
+        found = checks.filter_map do |where, (scope, column)|
+          count = scope.where(placeholder_condition(scope.model.arel_table[column])).count
+          [where, count] if count.positive?
+        end
+        # The data of a wiki version is binary (bytea): read it as Redmine does.
+        versions = WikiContentVersion.where(page_id: @page_map.values).to_a.count { |version| version.text.to_s.match?(TextLinks::LEFTOVER) }
+        found << ['wiki_content_versions.data', versions] if versions.positive?
+        found
       end
 
       # Renders every imported detail as Redmine does and looks for labels

@@ -245,24 +245,8 @@ module SnapshotsGen
         end
       end
 
-      # The .csys import creates each container's attachments in this order,
-      # so (container, ordinal) finds them again in the new instance.
       def attachment_containers
-        return @attachment_containers if @attachment_containers
-
-        containers = {}
-        @plan.items.each_value do |item|
-          next if item.synthetic?
-
-          @plan.attachments_of('Issue', item.source_id).each_with_index { |id, index| containers[id] = ['item', item.key, index] }
-        end
-        @plan.documents.each_value do |document|
-          document.attachment_ids.each_with_index { |id, index| containers[id] ||= ['document', document.key, index] }
-        end
-        table('wiki_pages').each do |page|
-          @plan.attachments_of('WikiPage', page['id']).each_with_index { |id, index| containers[id] = ['wiki_page', page['id'], index] }
-        end
-        @attachment_containers = containers
+        @plan.attachment_containers
       end
 
       def attachments
@@ -311,7 +295,7 @@ module SnapshotsGen
           @details.concat(details)
           {
             'id' => journal['id'], 'item_key' => item.key, 'user_id' => journal['user_id'],
-            'notes' => references(notes, "journal ##{journal['id']}"), 'private_notes' => journal['private_notes'],
+            'notes' => references(notes, "journal ##{journal['id']}", item), 'private_notes' => journal['private_notes'],
             'created_on' => journal['created_on']
           }
         end
@@ -337,8 +321,8 @@ module SnapshotsGen
           if ATTR_REFS.key?(key)
             translate_reference(item, journal, detail, base.merge('value_ref' => ATTR_REFS.fetch(key)))
           elsif key == 'description'
-            base.merge('old_value' => references(detail['old_value'], "detail ##{detail['id']}"),
-                       'value' => references(detail['value'], "detail ##{detail['id']}"))
+            base.merge('old_value' => references(detail['old_value'], "detail ##{detail['id']}", item),
+                       'value' => references(detail['value'], "detail ##{detail['id']}", item))
           elsif ATTR_LITERALS.include?(key)
             base
           else
@@ -373,8 +357,10 @@ module SnapshotsGen
         if (native = Rules::NATIVE_ISSUE_FIELDS[name])
           return drop(detail, item, "#{name} on an item that is not a requirement") if native['requirement'] && item.profile != 'requirement'
 
+          text = Rules::TEXT_NATIVE_FIELDS.include?(native['field'])
           mapped = lambda do |value|
             next nil if value.nil?
+            next references(value, "detail ##{detail['id']}", item) if text
 
             native['map'] ? (native['map'][value.to_s] || value) : value
           end
@@ -391,7 +377,15 @@ module SnapshotsGen
         end
         @plan.kept_fields[field['id']] ||= field
         reference = { 'user' => 'users', 'version' => 'versions' }[field['field_format']]
-        base.merge('prop_ref' => 'custom_fields', 'prop_key' => field['id'].to_s, 'value_ref' => reference)
+        row = base.merge('prop_ref' => 'custom_fields', 'prop_key' => field['id'].to_s, 'value_ref' => reference)
+        # Text values follow the current value (Plan#rewrite_field_value);
+        # cosmoSys never touches the history, so nothing needs protecting.
+        markdown = { 'text' => @plan.markdown_source?, 'string' => false }
+        return row unless markdown.key?(field['field_format'])
+
+        row.merge(%w[old_value value].to_h do |side|
+          [side, @plan.rewrite_text(detail[side], "detail ##{detail['id']}", item: item, markdown: markdown[field['field_format']])]
+        end)
       end
 
       # An attachment change keeps its attachment only when that attachment
@@ -464,20 +458,10 @@ module SnapshotsGen
         @source_ids[entity].include?(id)
       end
 
-      # Every "#id" of a migrated item becomes a placeholder the importer
-      # replaces with the new id; unknown items are escaped.
-      def references(text, subject)
-        return text if text.nil?
-
-        text.to_s.gsub(/(?<![A-Za-z0-9_!&-])#(\d+)(?![A-Za-z0-9_-])/) do
-          id = Regexp.last_match(1).to_i
-          if @plan.item_for_issue(id)
-            "##{Plan::PLACEHOLDER}#{id}"
-          else
-            @report.add('reference_neutralized', subject, reference: id)
-            "!##{id}"
-          end
-        end
+      # Links in a text of the history, rewritten as in the .csys
+      # (Plan#rewrite_text): placeholders the importer resolves.
+      def references(text, subject, item = nil)
+        @plan.rewrite_text(text, subject, item: item)
       end
 
       def wiki_pages

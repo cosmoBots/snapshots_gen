@@ -166,13 +166,50 @@ class CompareHistoryTest < Minitest::Test
     refute compare(sources, targets).ok?
   end
 
+  # The converter escapes every reference to an item that is not migrated,
+  # so an unchanged one means the target is not what it wrote.
   def test_unchanged_unknown_item_reference_still_needs_neutralization_evidence
     source, target = item, item(101)
     source['journals'] = [journal([], 'See #99')]
     target['journals'] = [journal([], 'See #99', 101)]
     result = compare(source, target)
-    assert_empty result.failures
+    refute_empty result.failures
     refute_empty result.unexplained
+  end
+
+  # user#N and links to attachments of the old instance: the target must name
+  # the user with the same login and a file with the same name and digest.
+  def test_user_and_attachment_links_keep_their_identity
+    host = { 'entries' => [{ 'code' => 'source_host', 'subject' => 'old.example.test', 'detail' => { 'protocol' => 'https' } },
+                           { 'code' => 'text_formatting', 'subject' => nil, 'detail' => { 'value' => 'markdown' } }] }
+    source, target = item, item(101)
+    source['journals'] = [journal([], 'Asked user#20: ![](https://old.example.test/attachments/download/7/a b.png)')]
+    target['journals'] = [journal([], 'Asked user#57: ![](/attachments/download/507/a b.png)', 101)]
+    source['text_refs'] = { 'users' => { '20' => 'ana' }, 'attachments' => { '7' => ['a b.png', 'd1'] } }
+    target['text_refs'] = { 'users' => { '57' => 'ana' }, 'attachments' => { '507' => ['a b.png', 'd1'] } }
+    assert compare(source, target, host).ok?
+    # Another person, another file or the old host are failures.
+    target['text_refs']['users']['57'] = 'bob'
+    refute compare(source, target, host).ok?
+    target['text_refs']['users']['57'] = 'ana'
+    target['text_refs']['attachments']['507'] = ['a b.png', 'other']
+    refute compare(source, target, host).ok?
+    target['text_refs']['attachments']['507'] = ['a b.png', 'd1']
+    target['journals'][0]['notes'] = 'Asked user#57: ![](https://old.example.test/attachments/download/7/a b.png)'
+    refute compare(source, target, host).ok?
+  end
+
+  def test_escaped_user_and_broken_attachment_need_their_report_entries
+    source, target = item, item(101)
+    source['journals'] = [journal([], 'user#77 [f](/attachments/download/8/f.pdf)')]
+    target['journals'] = [journal([], '!user#77 [f](/attachments/download/0/f.pdf)', 101)]
+    source['text_refs'] = { 'users' => { '77' => nil }, 'attachments' => { '8' => ['f.pdf', 'd8'] } }
+    result = compare(source, target)
+    assert_empty result.failures
+    assert_equal 2, result.unexplained.length
+    evidence = { 'entries' => report('user_reference_neutralized', 'journal #1', reference: 77)['entries'] +
+                              report('attachment_link_broken', 'journal #1', attachment: 8)['entries'] }
+    assert compare(source, target, evidence).ok?
   end
 
   def test_notes_escape_only_reported_unknown_reference_in_the_specific_journal

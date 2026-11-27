@@ -51,6 +51,7 @@ module SnapshotsGen
         history_dir = File.join(out, ".#{label}.history")
         history = HistoryBuilder.new(plan, csys_packages: packages.map { |package| package.except('path') })
         history.write(history_dir)
+        plan.report_text_counts!
         history_path = File.join(out, "#{label}.cshistory")
         LegacySnapshot::Writer.zip_directory(history_dir, history_path)
         FileUtils.rm_rf(history_dir)

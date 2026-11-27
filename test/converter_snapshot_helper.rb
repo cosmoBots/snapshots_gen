@@ -41,7 +41,7 @@ module ConverterSnapshotHelper
   end
 
   # attachment_files: ids of attachment rows whose file the package carries.
-  def legacy(directory, tables, attachment_files: [])
+  def legacy(directory, tables, attachment_files: [], settings: { 'text_formatting' => 'common_mark' })
     writer = LS::Writer.new(directory)
     tables.each do |name, rows|
       names = rows.flat_map(&:keys).uniq
@@ -70,18 +70,19 @@ module ConverterSnapshotHelper
     writer.write_report_rows('redactions', [])
     writer.write_report_document('inventory', { 'plugins' => [] })
     writer.finish!(captured_at: TIME, generator: { 'name' => 'test', 'version' => '0' },
-                   source: { 'label' => 'test', 'redmine_version' => '4.2.10', 'settings' => { 'text_formatting' => 'common_mark' } },
+                   source: { 'label' => 'test', 'redmine_version' => '4.2.10', 'settings' => settings },
                    consistency: { 'mode' => 'none' })
     directory
   end
 
   # Yields the history entities, the report and the plan of a conversion.
-  def convert(tables, attachment_files: [])
+  def convert(tables, attachment_files: [], settings: { 'text_formatting' => 'common_mark' })
     Dir.mktmpdir('converter-snapshot') do |tmp|
-      Converter::Source.open(legacy(File.join(tmp, 'legacy'), tables, attachment_files: attachment_files)) do |source|
+      Converter::Source.open(legacy(File.join(tmp, 'legacy'), tables, attachment_files: attachment_files, settings: settings)) do |source|
         report = Converter::Report.new
         plan = Converter::Plan.new(source, report).build!
         entities = Converter::HistoryBuilder.new(plan, csys_packages: []).entities
+        plan.report_text_counts!
         yield entities, report, plan
       end
     end

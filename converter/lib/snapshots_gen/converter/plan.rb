@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'rules'
+require_relative '../text_links'
 
 module SnapshotsGen
   module Converter
@@ -20,12 +21,12 @@ module SnapshotsGen
       CatalogEntry = Struct.new(:document_key, :project_id, :family, :position, :source_item_id, :references, keyword_init: true)
 
       attr_reader :source, :report, :projects, :items, :items_by_source_id, :documents, :catalog,
-                  :relations, :cross_relations, :absorbed, :kept_fields, :deferred_values, :roots,
-                  :description_references
+                  :relations, :cross_relations, :absorbed, :kept_fields, :deferred_values, :roots
 
       def initialize(source, report)
         @source = source
         @report = report
+        @text_counts = Hash.new(0)
       end
 
       def build!
@@ -802,53 +803,164 @@ module SnapshotsGen
 
       private
 
-      # "#123" item references in descriptions: inside the same package the
-      # cosmoSys import rewrites them; across packages the history importer
-      # does; references to items that are not migrated are escaped.
+      # Links in every text the .csys carries: descriptions (also of the
+      # generated items, which name their source item), the native text
+      # fields, the kept custom fields, documents and projects. The history
+      # builder does the same with the history (notes, wiki versions and the
+      # values of description and field changes) through rewrite_text, so the
+      # last value of a change is still the current text.
       def plan_references!
-        @description_references = []
+        source_host
         @items.each_value do |item|
-          next if item.synthetic?
-
           root = root_of(item.project_id)
-          item.description = rewrite_references(item.description, root, item.key) do |id|
-            @description_references << { 'item' => item.key, 'source_id' => id }
+          item.description = rewrite_text(item.description, item.key, item: item, protect_root: root)
+          item.profile_fields = (item.profile_fields || {}).to_h do |field, value|
+            next [field, value] unless Rules::TEXT_NATIVE_FIELDS.include?(field) && value.is_a?(String)
+
+            [field, rewrite_text(value, "#{item.key} #{field}", item: item)]
           end
+          item.custom_fields = Array(item.custom_fields).map do |entry|
+            entry.merge('value' => rewrite_field_value(entry['format'], entry['value'], "#{item.key} #{entry['name']}", item, root))
+          end
+        end
+        @documents.each_value do |document|
+          document.description = rewrite_text(document.description, document.key)
+        end
+        @project_descriptions = @projects.transform_values do |row|
+          rewrite_text(Rules.clean(row['description']).to_s, "project:#{row['id']}")
         end
         other = Hash.new(0)
         @items.each_value do |item|
-          item.description.scan(/(?<![A-Za-z0-9_])(document#\d+|version#\d+|r\d+\b|commit:|attachment#\d+)/) { other[Regexp.last_match(1)[/\A[a-z]+/]] += 1 }
+          item.description.scan(/(?<![A-Za-z0-9_])(r\d+\b|commit:)/) { other[Regexp.last_match(1)[/\A[a-z]+/]] += 1 }
           Rules.ambiguous_markdown_tables(item.description).each do |line|
             report.add('ambiguous_markdown_table', item.key, line: line)
           end
         end
-        other.each { |kind, count| report.add('other_references', kind, count: count) }
+        other.each { |kind, count| @text_counts["other:#{kind}"] += count }
       end
 
       public
 
-      PLACEHOLDER = 'snapshots-gen-item-'
+      # Where each migrated attachment goes: { id => [container, key, ordinal] }.
+      # The .csys import creates each container's attachments in this order,
+      # so (container, ordinal) finds them again in the new instance.
+      def attachment_containers
+        return @attachment_containers if @attachment_containers
 
-      # Returns the text with references to other packages turned into
-      # placeholders and references to unknown items escaped with "!".
-      def rewrite_references(text, root, subject)
-        text.to_s.gsub(/(?<![A-Za-z0-9_!&-])#(\d+)(?![A-Za-z0-9_-])/) do
-          id = Regexp.last_match(1).to_i
+        containers = {}
+        items.each_value do |item|
+          next if item.synthetic?
+
+          attachments_of('Issue', item.source_id).each_with_index { |id, index| containers[id] = ['item', item.key, index] }
+        end
+        documents.each_value do |document|
+          document.attachment_ids.each_with_index { |id, index| containers[id] ||= ['document', document.key, index] }
+        end
+        source.table('wiki_pages').each do |page|
+          attachments_of('WikiPage', page['id']).each_with_index { |id, index| containers[id] = ['wiki_page', page['id'], index] }
+        end
+        @attachment_containers = containers
+      end
+
+      def project_description(project_id)
+        @project_descriptions.fetch(project_id)
+      end
+
+      # The old instance's host and protocol, from its settings (Redmine's
+      # defaults when they were never saved). Links to it are links into the
+      # old instance.
+      def source_host
+        @source_host ||= begin
+          settings = source.table('settings').to_h { |row| [row['name'], row['value'].to_s.sub(/\A--- /, '').strip] }
+          host = settings['host_name'].to_s.empty? ? 'localhost:3000' : settings['host_name']
+          protocol = settings['protocol'].to_s.empty? ? 'http' : settings['protocol']
+          report.add('source_host', host, protocol: protocol, stored: !settings['host_name'].to_s.empty?)
+          TextLinks::Host.new(host, protocol)
+        end
+      end
+
+      # Code is recognized in both Markdown dialects.
+      def markdown_source?
+        %w[markdown common_mark].include?(text_formatting)
+      end
+
+      # A text of the old instance with its links rewritten
+      # (SnapshotsGen::TextLinks) and every change reported under subject.
+      # protect_root: the root project of the .csys the text goes into, whose
+      # item ids cosmoSys's own rewriter would take.
+      def rewrite_text(text, subject, item: nil, markdown: markdown_source?, protect_root: nil)
+        return text if text.nil?
+
+        protect = protect_root && lambda do |id|
           target = @items_by_source_id[id]
-          if target && root_of(target.project_id) == root
-            "##{id}"
-          elsif target
-            report.add('reference_cross_package', subject, reference: id)
-            yield id if block_given?
-            "##{PLACEHOLDER}#{id}"
+          target && root_of(target.project_id) == protect_root
+        end
+        rewriter = TextLinks::Rewriter.new(
+          item: ->(id) { @items_by_source_id.key?(id) }, user: ->(id) { @users.key?(id) },
+          attachment: ->(id) { attachment_containers.key?(id) }, host: source_host, markdown: markdown,
+          protect: protect
+        )
+        result, events = rewriter.rewrite(text)
+        record_text_events(subject, item, events)
+        result
+      end
+
+      # Kept custom fields: Redmine formats only text fields; cosmoSys's
+      # rewriter takes string, text and link values. A link value is a URL:
+      # only what that rewriter would take is protected.
+      def rewrite_field_value(format, value, subject, item, root)
+        return value.map { |entry| rewrite_field_value(format, entry, subject, item, root) } if value.is_a?(Array)
+        return value unless value.is_a?(String)
+
+        case format
+        when 'text' then rewrite_text(value, subject, item: item, protect_root: root)
+        when 'string' then rewrite_text(value, subject, item: item, markdown: false, protect_root: root)
+        when 'link'
+          protect = ->(id) { (target = @items_by_source_id[id]) && root_of(target.project_id) == root }
+          result, count = TextLinks.protect_literals(value, protect)
+          @text_counts['literal'] += count
+          result
+        else value
+        end
+      end
+
+      def text_counts
+        @text_counts
+      end
+
+      # One entry per kind of placeholder written, after the history builder
+      # has added its own.
+      def report_text_counts!
+        @text_counts.sort.each do |kind, count|
+          if kind.start_with?('other:')
+            report.add('other_references', kind.delete_prefix('other:'), count: count)
           else
-            report.add('reference_neutralized', subject, reference: id)
-            "!##{id}"
+            report.add('text_placeholders', kind, count: count)
           end
         end
       end
 
       private
+
+      def record_text_events(subject, item, events)
+        where = item ? { item: item.key, csid: item.csid } : {}
+        events.each do |event|
+          id = event['id']
+          case event['kind']
+          when 'item', 'user', 'literal' then @text_counts[event['kind']] += 1
+          when 'other_reference' then @text_counts["other:#{event['prefix']}"] += 1
+          when 'item_neutralized' then report.add('reference_neutralized', subject, reference: id, **where)
+          when 'user_neutralized' then report.add('user_reference_neutralized', subject, reference: id, **where)
+          when 'attachment', 'issue_url'
+            @text_counts[event['kind'] == 'attachment' ? 'attachment' : 'item'] += 1
+            report.add('instance_link_rewritten', subject, kind: event['kind'] == 'attachment' ? 'attachment' : 'item',
+                                                           source_id: id, absolute: event['absolute'], form: event['form'] || 'path', **where)
+          when 'attachment_broken' then report.add('attachment_link_broken', subject, attachment: id, absolute: event['absolute'], **where)
+          when 'issue_url_broken' then report.add('item_link_broken', subject, reference: id, absolute: event['absolute'], **where)
+          when 'old_host_kept' then report.add('old_host_link_kept', subject, url: event['url'], **where)
+          end
+        end
+      end
 
       def report_source_gaps!
         source.report_rows('gaps').each do |gap|
