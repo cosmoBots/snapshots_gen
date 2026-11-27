@@ -1,51 +1,71 @@
 # frozen_string_literal: true
 
 # Step 7.4: compares how every text renders in the old and in the new
-# instance, from two render_text.rb extracts and the conversion report. No
-# Rails or third-party gems are needed.
+# instance, from two render_text.rb extracts and the conversion report. It is
+# the check that does not share code with the converter: it only compares
+# what each Redmine rendered. No Rails or third-party gems are needed.
 #
 #   ruby compare_render.rb SOURCE.jsonl TARGET.jsonl REPORT.json [--details]
 #
-# Failures (exit 1):
-#   - a text of the new instance still holds a placeholder of the conversion;
-#   - a link or an image of the new instance points to the old instance;
-#   - a text shows fewer images than in the old instance, or another file;
-#   - a link to an item, a user or an attachment leads to another one than in
-#     the old instance (items paired by identity, users by login,
-#     attachments by file name and SHA-256), or disappears without the
-#     report entry that announces it;
-#   - an attachment of the new instance has no attachment with the same file
-#     name and SHA-256 in the old one, or one of the old instance is missing
-#     without a report entry that announces it.
-# A text that renders differently otherwise (other tags or visible text) is
-# explained when the report announces it for that text (Markdown dialect,
-# rewritten links to the old instance, escaped references, broken links), and
-# unexplained if not. Both counts must be 0.
+# Each text is compared node by node, in document order: structural tags,
+# text, links (destination, operation, query, fragment and text) and images.
+# The only differences accepted are the concrete transformations that the
+# conversion report announces for that very text:
+#   - item links show the item number, and for "##" the tracker name, which
+#     may change: only inside the text of a link to that same item;
+#   - a URL of the old instance that became a reference or a link shows the
+#     reference ("#N") or the file name instead of the URL
+#     (instance_link_rewritten);
+#   - an escaped reference shows as text (reference_neutralized), and a link
+#     to a record that was not migrated leads nowhere (item_link_broken,
+#     attachment_link_broken);
+#   - Markdown dialect (markdown_dialect): underline becomes italics,
+#     ~text~ becomes struck, x^2 loses its superscript, a lone "-" becomes an
+#     empty list item, and an image with a quoted destination (broken in the
+#     old instance) becomes its text.
+# Other announced dialect differences (lists, runs of underscores) cannot be
+# reproduced exactly: such a text passes only
+# if its words, links and images are the same, and is listed for review by
+# hand. Anything else is a failure (links, images, placeholders, links to the
+# old instance, attachments) or an unexplained difference.
+#
+# Attachments: every attachment of the new instance must be a file of the
+# old one with the same name and SHA-256 in the same logical container (the
+# item by its project and CSID, the document, wiki page, project or version),
+# and every attachment of the old one must be there unless the report says
+# why not.
+#
+# Exit code: 0 when there are no failures and no unexplained differences, 1
+# otherwise, 2 when the input cannot be read.
+require 'cgi'
 require 'json'
 require 'optparse'
 require_relative '../converter/lib/snapshots_gen/converter/rules'
 
 module RenderComparison
-  FORMAT = 'render-text-v1'
+  FORMAT = 'render-text-v2'
   Rules = SnapshotsGen::Converter::Rules
-  # Report entries that announce, for one text, that it renders differently.
-  EXPLAINING = %w[markdown_dialect instance_link_rewritten reference_neutralized user_reference_neutralized
-                  attachment_link_broken item_link_broken link_destination_bracketed].freeze
+  PRECISE = %w[underline strikethrough superscript empty_list_item quoted_destination].freeze
+  REVIEW = %w[list_indent list_marker underscores].freeze
 
   class Comparison
-    attr_reader :failures, :unexplained, :explained, :compared, :unpaired
+    attr_reader :failures, :unexplained, :explained, :review, :compared, :unpaired
 
     def initialize(source, target, report)
       @source_meta, @source = split(source, 'source')
       @target_meta, @target = split(target, 'target')
       @entries = report.fetch('entries')
       @by_subject = @entries.group_by { |entry| entry['subject'] }
-      @failures, @unexplained = [], []
+      @failures, @unexplained, @review = [], [], []
       @explained = Hash.new(0)
       @compared = 0
       @unpaired = Hash.new(0)
       @old_host = @source_meta['host'].to_s.downcase.split('/').first.to_s
-      pair_items
+      @renamed = @entries.select { |entry| %w[identity_renumbered identity_prefix_normalized].include?(entry['code']) }
+                         .to_h { |entry| [entry['subject'], entry.dig('detail', 'to')] }
+      @absorbed = @entries.select { |entry| entry['code'] == 'document_item_absorbed' }.to_h do |entry|
+        [entry['subject'].to_s[/\A#(\d+)\s/, 1].to_i, [entry.dig('detail', 'project'), entry.dig('detail', 'document')]]
+      end
     end
 
     def run
@@ -82,6 +102,8 @@ module RenderComparison
       io.puts "Not compared, as the report says: #{@unpaired.empty? ? 'none' : @unpaired.sort.map { |type, count| "#{type} #{count}" }.join(', ')}"
       io.puts "Explained differences (#{@explained.values.sum}):"
       @explained.sort.each { |reason, count| io.puts "  #{reason}: #{count}" }
+      io.puts "To review by hand, same words, links and images (#{@review.length}):"
+      @review.each { |line| io.puts "  #{line}" }
       io.puts "Unexplained differences (#{@unexplained.length}):"
       @unexplained.each { |line| io.puts "  #{line}" } if details || @unexplained.length <= 50
       io.puts "Failures (#{@failures.length}):"
@@ -97,26 +119,22 @@ module RenderComparison
       [meta, rows.reject { |row| row['kind'] == 'meta' }]
     end
 
-    # A source item => [project, CSID] in the target: the same CSID unless
-    # the report renumbered or normalized it.
-    def pair_items
-      @renamed = @entries.select { |entry| %w[identity_renumbered identity_prefix_normalized].include?(entry['code']) }
-                         .to_h { |entry| [entry['subject'], entry.dig('detail', 'to')] }
-    end
-
     def mapped_item(identity)
       return nil unless identity && identity['id']
 
       [identity['project'], @renamed.fetch("item:#{identity['id']}", identity['csid'])]
     end
 
+    def source_field(name)
+      native = Rules::NATIVE_ISSUE_FIELDS[name]
+      native ? native['field'] : name
+    end
+
     def source_key(row)
       case row['type']
       when 'description' then ['description', *mapped_item(row['item'])]
       when 'note' then ['note', *mapped_item(row['item']), row['at']]
-      when 'field'
-        native = Rules::NATIVE_ISSUE_FIELDS[row['field']]
-        ['field', *mapped_item(row['item']), native ? native['field'] : row['field']]
+      when 'field' then ['field', *mapped_item(row['item']), source_field(row['field'])]
       when 'wiki' then ['wiki', row.dig('page', 'project'), row.dig('page', 'title'), row.dig('page', 'version')]
       when 'document' then ['document', row.dig('document', 'project'), row.dig('document', 'title')]
       when 'project' then ['project', row['project']]
@@ -134,17 +152,34 @@ module RenderComparison
       end
     end
 
-    # Why a source text has no counterpart, when the report says so: its item
-    # became a document, its journal or its field was dropped.
+    # Why a source text has no counterpart, when the report says so.
     def missing_reason(row)
       item = row['item'] && row['item']['id']
-      if item && @entries.any? { |entry| entry['code'] == 'document_item_absorbed' && entry['subject'].to_s.start_with?("##{item} ") }
-        'item turned into a document'
-      elsif row['type'] == 'note' && @by_subject["journal ##{row['id']}"].to_a.any? { |entry| entry['code'] == 'history_journal_dropped' }
-        'journal dropped'
-      elsif row['type'] == 'field' && @by_subject["item:#{row['id']}"].to_a.any? { |entry| entry['code'] == 'field_dropped' && entry.dig('detail', 'field') == row['field'] }
-        'field dropped'
+      return 'item turned into a document' if item && @absorbed.key?(item)
+      if row['type'] == 'note' && Array(@by_subject["journal ##{row['id']}"]).any? { |entry| entry['code'] == 'history_journal_dropped' }
+        return 'journal dropped'
       end
+      return nil unless row['type'] == 'field'
+
+      field_missing_reason(row['field'], item)
+    end
+
+    def field_missing_reason(name, item)
+      native = Rules::NATIVE_ISSUE_FIELDS[name]
+      return 'native field that is not text' if native && !Rules::TEXT_NATIVE_FIELDS.include?(native['field'])
+      return 'field dropped' if Array(@by_subject[name]).any? { |entry| entry['code'] == 'field_dropped' }
+      if Array(@by_subject["item:#{item}"]).any? { |entry| entry['code'] == 'field_dropped' && entry.dig('detail', 'field') == name }
+        return 'field dropped'
+      end
+      if Rules::DATUM_FIELDS.include?(name) &&
+         @entries.any? { |entry| entry['code'] == 'datum_created' && entry.dig('detail', 'requirement') == "item:#{item}" }
+        return 'turned into project data'
+      end
+      if Rules::DOCUMENT_REFERENCE_FIELDS.key?(name) &&
+         Array(@by_subject["item:#{item}"]).none? { |entry| entry['code'] == 'reference_text_kept' && entry.dig('detail', 'field') == name }
+        return 'turned into catalog references'
+      end
+      nil
     end
 
     # The subject under which the converter reported this text.
@@ -152,9 +187,7 @@ module RenderComparison
       case row['type']
       when 'description' then "item:#{row['id']}"
       when 'note' then "journal ##{row['id']}"
-      when 'field'
-        native = Rules::NATIVE_ISSUE_FIELDS[row['field']]
-        "item:#{row['id']} #{native ? native['field'] : row['field']}"
+      when 'field' then "item:#{row['id']} #{source_field(row['field'])}"
       when 'wiki' then "wiki version ##{row['id']}"
       when 'document' then "document:#{row['id']}"
       when 'project' then "project:#{row['id']}"
@@ -167,155 +200,243 @@ module RenderComparison
       "#{row['type']} #{label}#{row['field'] ? " #{row['field']}" : ''}#{row['at'] ? " #{row['at']}" : ''}"
     end
 
-    def old_host?(link)
-      host = link['host'].to_s
-      !@old_host.empty? && (host == @old_host || host.start_with?("#{@old_host}:"))
+    def old_host?(destination)
+      host = destination['host'].to_s
+      !@old_host.empty? && host.split(':').first == @old_host.split(':').first
     end
 
     # Placeholders and links to the old instance, in every text of the new one.
     def check_target(row)
       @failures << "#{where(row)}: #{row['markers']} placeholders left" if row['markers'].to_i.positive?
-      (row['links'] + row['images']).each do |link|
-        @failures << "#{where(row)}: points to the old instance (#{link['external']})" if link['external'] && old_host?(link)
+      row['nodes'].each do |node|
+        next unless %w[link img].include?(node[0]) && node[1]['kind'] == 'external' && old_host?(node[1])
+
+        @failures << "#{where(row)}: points to the old instance (#{node[1]['url']})"
       end
     end
 
-    def evidence?(row, codes, detail = {})
-      Array(@by_subject[subject(row)]).any? do |entry|
-        codes.include?(entry['code']) && detail.all? { |key, value| entry.dig('detail', key).to_s == value.to_s }
+    def entries_for(row, code)
+      Array(@by_subject[subject(row)]).select { |entry| entry['code'] == code }
+    end
+
+    # --- nodes -------------------------------------------------------------
+
+    # What identifies a destination across instances.
+    def destination_key(destination, source:)
+      extra = [destination['query'], destination['fragment']]
+      case destination['kind']
+      when 'item'
+        item = destination['item']
+        return ['item', 'missing', destination['rest'], *extra] if item.key?('missing')
+
+        ['item', *(source ? mapped_item(item) : [item['project'], item['csid']]), destination['rest'], *extra]
+      when 'attachment'
+        file = destination['attachment']
+        return ['attachment', 'missing', destination['operation'], *extra] if file.key?('missing')
+
+        ['attachment', file['filename'], file['sha256'], destination['operation'], destination['rest'], *extra]
+      when 'user' then ['user', destination['user']['login'] || 'missing', *extra]
+      when 'external' then ['external', destination['url']]
+      when 'mailto' then ['mailto', destination['url']]
+      when 'anchor' then ['anchor']
+      when 'broken' then ['broken']
+      else ['other', destination['path'] || destination['url'], *extra]
       end
+    end
+
+    # Item links show the number of the item and, for "##", its tracker.
+    def link_text(destination, text)
+      return text unless destination['kind'] == 'item' && destination['item']['tracker']
+
+      tracker = destination['item']['tracker']
+      text.sub(/\A#{Regexp.escape(tracker)} #\d+/, 'TRACKER #ITEM').sub(/\A#\d+/, '#ITEM')
+    end
+
+    # [type, key, text] plus, for links and images, [destination, raw text].
+    def normalize(nodes, source:)
+      nodes.map do |node|
+        case node[0]
+        when 'link' then ['link', destination_key(node[1], source: source), link_text(node[1], node[2]), node[1], node[2]]
+        when 'img' then ['img', destination_key(node[1], source: source), nil, node[1], nil]
+        else node
+        end
+      end
+    end
+
+    # Adjacent texts merged, whitespace collapsed and trimmed, empty texts
+    # dropped.
+    def comparable(nodes)
+      merged = nodes.each_with_object([]) do |node, result|
+        if node[0] == 'text' && result.last && result.last[0] == 'text'
+          result.last[1] = "#{result.last[1]}#{node[1]}"
+        else
+          result << node.dup
+        end
+      end
+      merged.map { |node| node[0] == 'text' ? ['text', node[1].gsub(/\s+/, ' ').strip] : node.first(3) }
+            .reject { |node| node[0] == 'text' && node[1].empty? }
+    end
+
+    # The source nodes as the announced link transformations make them.
+    # Returns the nodes and the report codes used.
+    def transform(row, nodes)
+      used = []
+      rewritten = entries_for(row, 'instance_link_rewritten')
+      neutralized = entries_for(row, 'reference_neutralized').map { |entry| entry.dig('detail', 'reference') }
+      broken_items = entries_for(row, 'item_link_broken').map { |entry| entry.dig('detail', 'reference') }
+      broken_files = entries_for(row, 'attachment_link_broken').map { |entry| entry.dig('detail', 'attachment') }
+      result = nodes.map do |node|
+        next node unless %w[link img].include?(node[0])
+
+        destination = node[3]
+        id = destination['kind'] == 'item' ? destination.dig('item', 'id') : destination.dig('attachment', 'id')
+        if destination['kind'] == 'item' && node[0] == 'link' && neutralized.include?(id)
+          used << 'reference_neutralized'
+          next ['text', node[4].to_s.match?(/\A.+ #\d+(?:#note)?(?:-\d+)?: /) ? "###{id}" : node[4]]
+        end
+        if destination['kind'] == 'item' && broken_items.include?(id)
+          used << 'item_link_broken'
+          next [node[0], ['item', 'missing', *node[1].last(3)], node[2], destination, node[4]]
+        end
+        if destination['kind'] == 'attachment' && broken_files.include?(id)
+          used << 'attachment_link_broken'
+          key = node[0] == 'img' ? ['broken'] : ['attachment', 'missing', destination['operation'], destination['query'], destination['fragment']]
+          next [node[0], key, node[2], destination, node[4]]
+        end
+        if node[0] == 'link' && node[4].to_s.match?(%r{\A(?:https?:)?//}i) &&
+           rewritten.any? { |entry| entry.dig('detail', 'kind') == destination['kind'] && entry.dig('detail', 'source_id') == id }
+          used << 'instance_link_rewritten'
+          text = if destination['kind'] == 'item'
+                   fragment = destination['fragment'].to_s
+                   "#ITEM#{fragment.match?(/\Anote-\d+\z/) && destination['query'].nil? ? "##{fragment}" : ''}"
+                 else
+                   CGI.unescape(node[4].split(/[?#]/).first.split('/').last.to_s)
+                 end
+          next [node[0], node[1], text, destination, node[4]]
+        end
+        node
+      end
+      [result, used]
+    end
+
+    def dialect_kinds(row)
+      entries_for(row, 'markdown_dialect').flat_map { |entry| Array(entry.dig('detail', 'kinds')) }.uniq
+    end
+
+    # The precise dialect transformations, on the source (underline,
+    # superscript) or on the target (strikethrough, empty list item).
+    def dialect(kinds, source_nodes, target_nodes)
+      if kinds.include?('underline')
+        source_nodes = source_nodes.map { |node| node[0] == 'u' ? ['em'] : (node[0] == '/u' ? ['/em'] : node) }
+      end
+      if kinds.include?('superscript')
+        source_nodes = source_nodes.flat_map { |node| node[0] == 'sup' ? [['text', '^']] : (node[0] == '/sup' ? [] : [node]) }
+      end
+      if kinds.include?('strikethrough')
+        target_nodes = target_nodes.map { |node| %w[del /del].include?(node[0]) ? ['text', '~'] : node }
+      end
+      if kinds.include?('quoted_destination')
+        source_nodes = source_nodes.reject { |node| node[0] == 'img' && node[1] == ['broken'] }
+        target_nodes = target_nodes.map do |node|
+          node[0] == 'text' ? ['text', node[1].gsub(/!?\[[^\]]*\]\(\s*(["'])[^"']*\1\s*\)/, '')] : node
+        end
+      end
+      if kinds.include?('empty_list_item')
+        result = []
+        index = 0
+        while index < target_nodes.length
+          if target_nodes[index, 4].map(&:first) == %w[ul li /li /ul]
+            result << ['text', '-']
+            index += 4
+          else
+            result << target_nodes[index]
+            index += 1
+          end
+        end
+        target_nodes = result
+      end
+      [source_nodes, target_nodes]
+    end
+
+    def links_and_images(nodes)
+      nodes.select { |node| %w[link img].include?(node[0]) }
+    end
+
+    def words(nodes)
+      nodes.flat_map { |node| node[0] == 'text' ? node[1].scan(/[[:alnum:]]+/) : (node[0] == 'link' ? node[2].to_s.scan(/[[:alnum:]]+/) : []) }
     end
 
     def compare_text(before, after)
       context = where(before)
-      compare_images(before, after, context)
-      compare_links(before, after, context)
-      return if before['tags'] == after['tags'] && normalized(before['visible']) == normalized(after['visible'])
-
-      reasons = Array(@by_subject[subject(before)]).map { |entry| entry['code'] }.uniq & EXPLAINING
-      if reasons.empty?
-        @unexplained << "#{context}: renders differently (#{tag_difference(before['tags'], after['tags'])})"
-      else
-        reasons.each { |reason| @explained["#{reason} [report.json]"] += 1 }
-      end
-    end
-
-    # Item links show the item number and, for "##", its tracker: both may
-    # change. Everything else must read the same.
-    def normalized(text)
-      text.to_s.gsub(/\b[\w-]+ #\d+/, '#N').gsub(/#\d+/, '#N').gsub(/\s+/, '')
-    end
-
-    def tag_difference(before, after)
-      (before.keys | after.keys).sort.filter_map do |tag|
-        delta = after.fetch(tag, 0) - before.fetch(tag, 0)
-        "#{tag}#{delta.positive? ? '+' : ''}#{delta}" unless delta.zero?
-      end.join(' ').then { |text| text.empty? ? 'visible text' : text }
-    end
-
-    def working(images)
-      images.reject { |image| image.key?('broken') || (image['external'] && old_host?(image)) }
-    end
-
-    def image_identity(image)
-      image['attachment'] ? ['attachment', image['attachment']['filename'], image['attachment']['sha256']] : ['external', image['external']]
-    end
-
-    def compare_images(before, after, context)
-      source = before['images'].reject { |image| image.key?('broken') }
-      target = working(after['images'])
-      if target.length < source.length
-        @failures << "#{context}: #{source.length} images in the source, #{target.length} in the target"
+      expected, used = transform(before, normalize(before['nodes'], source: true))
+      actual = normalize(after['nodes'], source: false)
+      kinds = dialect_kinds(before)
+      blank = ->(nodes) { nodes.reject { |node| node[0] == 'text' && node[1].strip.empty? } }
+      expected, actual = dialect(kinds & PRECISE, blank.call(expected), blank.call(actual))
+      expected = comparable(expected)
+      actual = comparable(actual)
+      expected_links = links_and_images(expected)
+      actual_links = links_and_images(actual)
+      unless expected_links == actual_links
+        index = (0...[expected_links.length, actual_links.length].max).find { |i| expected_links[i] != actual_links[i] }
+        @failures << "#{context}: link or image #{index + 1} differs: #{describe(expected_links[index])} -> #{describe(actual_links[index])}"
         return
       end
-      missing = multiset_difference(source.map { |image| image_identity(image) }, target.map { |image| image_identity(image) })
-      missing.each { |identity| @failures << "#{context}: image #{identity[1]} is not the same file in the target" }
+      if expected == actual
+        reasons = used + ((kinds & PRECISE).any? ? ['markdown_dialect'] : [])
+        reasons.uniq.each { |reason| @explained["#{reason} [report.json]"] += 1 }
+        return
+      end
+      if (kinds & REVIEW).any? && words(expected) == words(actual)
+        @review << "#{context}: #{(kinds & REVIEW).join(', ')}"
+        return
+      end
+      @unexplained << "#{context}: renders differently (#{first_difference(expected, actual)})"
     end
 
-    def link_identity(link)
-      if link['item']
-        link['item'].key?('missing') ? ['item', 'missing'] : ['item', *mapped_item(link['item'])]
-      elsif link['user'] then ['user', link['user']['login'] || 'missing']
-      elsif link['attachment'] then ['attachment', link['attachment']['filename'], link['attachment']['sha256']]
-      end
+    def describe(node)
+      node ? "#{node[0]} #{Array(node[1]).compact.join(' ')}#{node[2] ? " \"#{node[2]}\"" : ''}" : 'nothing'
     end
 
-    def target_link_identity(link)
-      if link['item']
-        link['item'].key?('missing') ? ['item', 'missing'] : ['item', link['item']['project'], link['item']['csid']]
-      elsif link['user'] then ['user', link['user']['login'] || 'missing']
-      elsif link['attachment'] then ['attachment', link['attachment']['filename'], link['attachment']['sha256']]
-      end
+    def first_difference(expected, actual)
+      index = (0...[expected.length, actual.length].max).find { |i| expected[i] != actual[i] }
+      "node #{index + 1}: #{expected[index]&.first || 'nothing'} -> #{actual[index]&.first || 'nothing'}"
     end
 
-    # Links to items, users and attachments must lead to the same record. A
-    # source link may be missing in the target only with the entry that
-    # announces it for this text (an escaped reference, a broken link).
-    def compare_links(before, after, context)
-      source = before['links'].filter_map { |link| link_identity(link) && [link, link_identity(link)] }
-      target = after['links'].filter_map { |link| target_link_identity(link) }
-      remaining = target.dup
-      source.each do |link, identity|
-        index = remaining.index(identity)
-        if index
-          remaining.delete_at(index)
-          next
-        end
-        next if announced_loss?(before, link)
+    # --- attachments ------------------------------------------------------
 
-        @failures << "#{context}: link to #{identity.join(' ')} leads elsewhere or is gone in the target"
-      end
-      remaining.each do |identity|
-        next if identity == %w[item missing] || identity == %w[user missing]
+    def expected_container(container)
+      return container.first(3) unless container[0] == 'item'
 
-        @failures << "#{context}: link to #{identity.join(' ')} that the source does not have"
-      end
+      id = container[3]
+      return ['document', *@absorbed[id]] if @absorbed.key?(id)
+
+      ['item', container[1], @renamed.fetch("item:#{id}", container[2])]
     end
 
-    def announced_loss?(row, link)
-      if link['item'] && link['item']['id']
-        evidence?(row, %w[reference_neutralized item_link_broken], 'reference' => link['item']['id'])
-      elsif link['item'] || (link['user'] && link['user'].key?('missing'))
-        true # it led nowhere in the source either
-      elsif link['attachment']
-        link['attachment'].key?('missing') || evidence?(row, %w[attachment_link_broken])
-      elsif link['user']
-        evidence?(row, %w[user_reference_neutralized])
-      end
-    end
-
-    def multiset_difference(left, right)
-      remaining = right.dup
-      left.reject do |value|
-        index = remaining.index(value)
-        index && remaining.delete_at(index)
-      end
-    end
-
-    # Every attachment of a migrated project must be a file of the source,
-    # byte for byte; every source attachment must be in the target unless the
-    # report says why not.
     def compare_attachments
       source = @source.select { |row| row['kind'] == 'attachment' }
       projects = source.map { |row| row['project'] }.compact.uniq
       target = @target.select { |row| row['kind'] == 'attachment' && projects.include?(row['project']) }
-      unmatched = source.dup
+      unmatched = source.map { |row| [row, [expected_container(row['container']), row['filename'], row['sha256']]] }
       target.each do |row|
-        # The same file can be in several attachments, some of them not
-        # migrated on purpose: an announced one is taken last.
-        same = ->(candidate) { [candidate['filename'], candidate['sha256']] == [row['filename'], row['sha256']] }
-        index = unmatched.index { |candidate| same.call(candidate) && !attachment_announced?(candidate) } || unmatched.index(&same)
+        key = [row['container'].first(3), row['filename'], row['sha256']]
+        # The same file can also be in an attachment that is not migrated on
+        # purpose: that one is taken last.
+        index = unmatched.index { |candidate, expected| expected == key && !attachment_announced?(candidate) } ||
+                unmatched.index { |_candidate, expected| expected == key }
         if index
           unmatched.delete_at(index)
         else
-          @failures << "attachment ##{row['id']} (#{row['filename']}) of #{row['project']}: no file of the source with this name and SHA-256"
+          @failures << "attachment ##{row['id']} (#{row['filename']}) of #{row['container'].first(3).compact.join(' ')}: " \
+                       'no file of the source with this name and SHA-256 in this container'
         end
       end
-      unmatched.each do |row|
+      unmatched.each do |row, _expected|
         if attachment_announced?(row)
           @explained['attachment not migrated [report.json]'] += 1
         else
-          @failures << "attachment ##{row['id']} (#{row['filename']}) is not in the target and the report does not say why"
+          @failures << "attachment ##{row['id']} (#{row['filename']}) is not in its container in the target and the report does not say why"
         end
       end
     end
