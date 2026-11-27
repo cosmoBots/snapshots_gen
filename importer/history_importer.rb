@@ -546,6 +546,11 @@ module SnapshotsGen
                       else
                         Version.find(@version_map.fetch(row['container_key'].to_i) { raise Error, "version #{row['container_key']} was not imported" })
                       end
+          # A second confirmed import would add every file again.
+          if Attachment.where(container: container, filename: row['filename'], digest: row['sha256']).exists?
+            raise Error, "the file #{row['filename']} of #{container.class.name.downcase} #{container.id} is already here: " \
+                         'the history of this package was imported before'
+          end
           attachment = File.open(@package.asset_path(row['sha256']), 'rb') do |file|
             Attachment.create!(container: container, author: User.find_by(id: user_id(row['author_id'])) || User.anonymous,
                                file: file, filename: row['filename'], content_type: row['content_type'],
