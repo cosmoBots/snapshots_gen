@@ -2,6 +2,7 @@
 
 require 'set'
 require 'strscan'
+require 'uri'
 
 module SnapshotsGen
   # Links inside the texts of a migration (descriptions, notes, text fields,
@@ -20,9 +21,17 @@ module SnapshotsGen
   # anchor, an escaped "!#123") but that the rewriter would still take is
   # protected the same way, and restored as it was.
   #
+  # What is a link is decided as Redmine 4.2 decided it: the Rewriter renders
+  # the text with the formatter of the old instance (SnapshotsGen::Redmine42)
+  # and, for each candidate, renders it again with its digits replaced by a
+  # sentinel, to see what the old instance made of that very candidate. A
+  # candidate whose digits change the rendering of the text (the key of a
+  # Markdown reference link, for instance) cannot be decided that way: it is
+  # left as it was and reported.
+  #
   # The same code serves the converter (Rewriter), the importer (Resolver)
-  # and the history comparison, so the three always agree. It only needs
-  # Ruby's standard library.
+  # and the history comparison. The Resolver only needs Ruby's standard
+  # library; the Rewriter loads Redcarpet, which the converter image has.
   module TextLinks
     ITEM = 'snapshots-gen-item-'
     USER = 'snapshots-gen-user-'
@@ -31,26 +40,12 @@ module SnapshotsGen
     # Any placeholder left in a text means something was not resolved.
     LEFTOVER = /snapshots-gen-(?:item|user|attachment|hash)-\d+/.freeze
     LEFTOVER_LIKE = %w[%snapshots-gen-item-% %snapshots-gen-user-% %snapshots-gen-attachment-% %snapshots-gen-hash-%].freeze
+    # A text of the source that already holds something that looks like a
+    # placeholder is escaped (snapshots-gen- becomes snapshots-gen-esc-) and
+    # restored by the Resolver.
 
     # The key pattern of cosmoSys's rewriter for a "#id" (see above).
     COSMOSYS_HASH = /(?<![A-Za-z0-9_-])#(\d+)(?![A-Za-z0-9_-])/.freeze
-
-    # A reference as Redmine 4.2 parses it (ApplicationHelper LINKS_RE): after
-    # a space, "(", ",", "-", "[", ">" or the start, an optional "!" escape,
-    # an optional "project:" prefix, an optional object prefix, "#" or "##",
-    # an id, an optional note suffix, and then the end of the word. Redmine
-    # applies it to the HTML, so one or two Markdown marks that become tags
-    # ("**", "_", "~", "^", "|") after such a start also count as a start.
-    REFERENCE = /
-      (?:(?<![^\s(,\-\[>])|(?<=\A[*_~^|])|(?<=[\s(,\-\[>][*_~^|])|(?<=\A[*_~^|]{2})|(?<=[\s(,\-\[>][*_~^|]{2}))
-      (?<esc>!)?
-      (?<project>[a-z0-9\-_]+:)?
-      (?<prefix>attachment|document|version|forum|news|message|project|user)?
-      (?<sep>\#\#?)
-      (?<id>\d+)
-      (?<suffix>(?:\#note)?-\d+)?
-      (?=[[:punct:]](?:[^A-Za-z0-9_\/]|\z)|,|\s|\]|<|\z)
-    /x.freeze
 
     # Absolute URLs, with balanced parentheses in the path (file names).
     URL = %r{(?<![\w.\-/])https?://[^/\s"'<>)\]]+(?:/(?:[^\s"'<>()\]]|\([^\s"'<>()\]]*\))*)?}i.freeze
@@ -58,10 +53,16 @@ module SnapshotsGen
     # One Markdown inline link or image: "[text](inner)" with one level of
     # parentheses inside.
     MARKDOWN_LINK = /(?<bang>!?)\[(?<label>[^\]\r\n]*)\]\((?<inner>(?:[^()\r\n]|\([^()\r\n]*\))*)\)/.freeze
-    REFERENCE_DEFINITION = /^(?<lead>[ \t]{0,3}\[[^\]\r\n]+\]:[ \t]*)(?<dest><[^>\r\n]*>|\S+)/.freeze
-    ANCHOR = %r{<a\b[^>]*>.*?</a\s*>}im.freeze
-    AUTOLINK = %r{<(?<url>https?://[^>\s]+)>}i.freeze
-    TAG = %r{</?[A-Za-z][^<>\n]*>}.freeze
+
+    # A link to an attachment or an item of an instance, relative or with a
+    # host (with or without a scheme), with what follows the id.
+    INSTANCE_URL = %r{
+      (?:(?<![\w.\-/:])(?:(?<scheme>https?):)?//(?<host>[^/?\#\s<>"'\[\]()]+)(?<prefix>(?:/[^/?\#\s<>"'\[\]()]+)*?)|(?<![\w.\-/:]))
+      (?<path>/(?<kind>attachments/(?<operation>download/|thumbnail/)?|issues/)(?<id>\d+))
+      (?<rest>(?:[/?\#](?:[^\s<>"'\[\]()]|\([^\s<>"'()\[\]]*\))*)?)
+    }x.freeze
+    LOOKALIKE = 'snapshots-gen-'
+    ESCAPED = 'snapshots-gen-esc-'
 
     # The angle rule: a destination that CommonMark would not accept because
     # it has spaces (Redcarpet, the "markdown" formatter of Redmine 4.2, did)
@@ -69,9 +70,8 @@ module SnapshotsGen
     # "<", ">", "[", "]", "!" or a line break, with balanced parentheses.
     ANGLE_DESTINATION = /\A[^()<>"'\r\n\[\]!]*(?:\([^()<>"'\r\n]*\)[^()<>"'\r\n\[\]!]*)*\z/.freeze
 
-    # Where code starts and ends. Indented code blocks are not recognized:
-    # in a text they cannot be told from a nested list without parsing the
-    # whole document.
+    # Where code starts and ends, for the checks of TextChecks (the Rewriter
+    # asks the formatter instead). Indented code blocks are not recognized.
     FENCE = /\A(?<indent>[ \t]*)(?<fence>`{3,}|~{3,})/.freeze
 
     module_function
@@ -162,44 +162,70 @@ module SnapshotsGen
     # which may carry a port and a path prefix, and "protocol"). Links to it
     # are links into the old instance.
     class Host
+      DEFAULT_PORTS = [80, 443].freeze
       attr_reader :name, :protocol
 
       def initialize(name, protocol = 'https')
         @name = name.to_s.strip.sub(%r{\Ahttps?://}i, '').sub(%r{/+\z}, '')
         @protocol = protocol.to_s.strip.empty? ? 'https' : protocol.to_s.strip
+        authority, prefix = @name.split('/', 2)
+        @host, port = authority.to_s.downcase.split(':', 2)
+        @port = port && port.to_i
+        @prefix = prefix.to_s.empty? ? '' : "/#{prefix}"
       end
 
       def empty?
         @name.empty?
       end
 
-      # The path of a URL of the old instance (starting with "/"), or nil.
-      # Both schemes are taken: people paste either.
-      def path(url)
-        return nil if empty?
+      # Whether an authority ("host" or "host:port", from a URL with scheme
+      # or scheme-relative) is the old instance. A default port written out
+      # is the same server.
+      def authority?(authority)
+        return false if empty? || authority.nil?
 
-        match = url.match(%r{\Ahttps?://#{Regexp.escape(@name)}(?<path>/.*)?\z}i)
-        match && (match[:path] || '/')
+        host, port = authority.downcase.split(':', 2)
+        return false unless host == @host
+
+        port = port && port.to_i
+        @port ? port == @port : (port.nil? || DEFAULT_PORTS.include?(port))
+      end
+
+      # The path of a URL of the old instance (starting with "/"), or nil.
+      # Both schemes are taken, and scheme-relative URLs: people paste either.
+      def path(url)
+        match = url.to_s.match(%r{\A(?:https?:)?//(?<authority>[^/?#\s]+)(?<path>[/?#].*)?\z}i)
+        return nil unless match && authority?(match[:authority])
+
+        path = match[:path] || '/'
+        return path if @prefix.empty?
+
+        path.start_with?("#{@prefix}/") ? path.delete_prefix(@prefix) : nil
       end
     end
 
     # Rewrites a text of the old instance for the converter. The callables
     # say what the conversion knows:
     #   item.(id)       -> whether the item reaches the new instance
-    #   user.(id)       -> whether the principal exists in the old instance
+    #   user.(id)       -> whether the old instance linked user#id (a user of
+    #                      type User; groups, the anonymous user and missing
+    #                      ids showed as text)
     #   attachment.(id) -> whether the attachment reaches the new instance
     #   protect.(id)    -> whether cosmoSys's rewriter would take "#id" in this
     #                      text (an item id of the same .csys); nil when the
     #                      text does not go through it
+    # markdown: the text was formatted with "markdown" (false: no formatting);
+    # angle: apply the angle rule (Redcarpet sources only).
     # rewrite returns the new text and the events, one hash per change.
     class Rewriter
       def initialize(item:, user:, attachment:, host:, markdown: true, angle: markdown, protect: nil)
+        require_relative 'redmine42'
         @item = item
         @user = user
         @attachment = attachment
         @host = host || Host.new('')
-        @markdown = markdown
-        @angle = angle
+        @formatting = markdown ? 'markdown' : 'plain'
+        @angle = angle && markdown
         @protect = protect
       end
 
@@ -207,9 +233,15 @@ module SnapshotsGen
         return [text, []] if text.nil?
 
         @events = []
-        result = TextLinks.segments(text.to_s, markdown: @markdown).map do |part, code|
-          code ? part : rewrite_plain(part)
-        end.join
+        @text = text.to_s
+        @base = Redmine42.to_html(@text, @formatting)
+        @sentinel = sentinel
+        edits = url_edits
+        edits = angle_edits(edits) if @angle
+        reference_edits(edits)
+        lookalike_edits(edits)
+        result = apply(@text, edits)
+        report_other_old_host_links
         result = protect_literals(result) if @protect
         [result, @events]
       end
@@ -220,170 +252,243 @@ module SnapshotsGen
         @events << { 'kind' => kind }.merge(detail.transform_keys(&:to_s))
       end
 
-      # Constructs whose inside is not a reference (link texts, tags and
-      # URLs) are handled whole; references are looked for in the rest.
-      def rewrite_plain(text)
-        pattern = Regexp.union(ANCHOR, AUTOLINK, MARKDOWN_LINK, REFERENCE_DEFINITION, TAG, URL)
-        output = +''
-        position = 0
-        after_construct = false
-        text.to_enum(:scan, pattern).each do
+      # Digits that appear nowhere in the text or its rendering.
+      def sentinel
+        candidate = 7_770_000_001
+        candidate += 1 while @text.include?(candidate.to_s) || @base.include?(candidate.to_s)
+        candidate.to_s
+      end
+
+      # The rendering of the text with the characters from start to finish
+      # replaced by the sentinel, or nil when that changes anything else of
+      # the rendering than those characters.
+      def probe(text, start, finish, base = @base)
+        original = text[start...finish]
+        html = Redmine42.to_html(text[0...start] + @sentinel + text[finish..].to_s, @formatting)
+        html.gsub(@sentinel, original) == base ? html : nil
+      end
+
+      # Edits are [start, finish, replacement] over the original text.
+      def overlaps?(edits, start, finish)
+        edits.any? { |from, to, _replacement| start < to && finish > from }
+      end
+
+      def apply(text, edits)
+        result = text.dup
+        edits.sort_by { |from, _to, _replacement| -from }.each do |from, to, replacement|
+          result[from...to] = replacement
+        end
+        result
+      end
+
+      # --- links to attachments and items, and URLs of the old instance ---
+
+      def url_edits
+        edits = []
+        @text.to_enum(:scan, INSTANCE_URL).each do
           match = Regexp.last_match
-          output << rewrite_references(text[position...match.begin(0)], position.zero? ? nil : output[-1], after_construct)
-          output << rewrite_construct(match[0])
-          position = match.end(0)
-          after_construct = true
-        end
-        output << rewrite_references(text[position..].to_s, position.zero? ? nil : output[-1], after_construct)
-        output
-      end
+          absolute = !match[:host].nil?
+          # The host, and the path prefix of host_name if it has one.
+          next if absolute && @host.path("//#{match[:host]}#{match[:prefix]}/") != '/'
 
-      def rewrite_construct(token)
-        if (match = token.match(/\A#{ANCHOR}\z/))
-          token.sub(/\A<a\b[^>]*>/i) { |tag| rewrite_attributes(tag) }
-        elsif (match = token.match(/\A#{AUTOLINK}\z/))
-          replacement = bare_url(match[:url])
-          replacement == match[:url] ? token : replacement
-        elsif (match = token.match(/\A#{MARKDOWN_LINK}\z/))
-          "#{match[:bang]}[#{match[:label]}](#{rewrite_inner(match[:inner])})"
-        elsif (match = token.match(/\A#{REFERENCE_DEFINITION}\z/))
-          match[:lead] + rewrite_destination(match[:dest])
-        elsif token.match?(/\A#{TAG}\z/)
-          rewrite_attributes(token)
-        else
-          bare_url(token)
-        end
-      end
+          start = match.begin(0)
+          id_start = match.begin(:id)
+          id_finish = match.end(:id)
+          html = probe(@text, id_start, id_finish)
+          next unless html
 
-      # The inside of "(...)" of a Markdown link: destination and title.
-      def rewrite_inner(inner)
-        match = inner.match(/\A(?<lead>\s*)(?<dest><[^>]*>|\S+)(?<rest>.*)\z/m)
-        rewritten = match ? "#{match[:lead]}#{rewrite_destination(match[:dest])}#{match[:rest]}" : inner
-        angle(rewritten)
-      end
+          use = Redmine42.destinations(html).find { |entry| entry['url'].include?(@sentinel) }
+          next unless use # not a link in the old instance (code, plain text...)
 
-      def angle(inner)
-        return inner unless @angle && inner.match?(ANGLE_DESTINATION)
-
-        destination = inner.strip
-        return inner unless destination.include?(' ') && !destination.match?(/\A[a-z][a-z0-9+.-]*:/i)
-
-        event('angle', destination: destination)
-        "<#{destination}>"
-      end
-
-      def rewrite_attributes(tag)
-        tag.gsub(/(\b(?:href|src)\s*=\s*)(["']?)([^"'\s>]+)\2/i) do
-          "#{Regexp.last_match(1)}#{Regexp.last_match(2)}#{rewrite_destination(Regexp.last_match(3), html: true)}#{Regexp.last_match(2)}"
-        end
-      end
-
-      # A link destination: a URL of the old instance or a path of the
-      # instance (the new one serves the same paths) naming an attachment or
-      # an item becomes a path with a placeholder.
-      def rewrite_destination(destination, html: false)
-        bracketed = !html && destination.start_with?('<') && destination.end_with?('>')
-        url = bracketed ? destination[1..-2] : destination
-        path = url.start_with?('/') ? url : @host.path(url)
-        return destination unless path
-
-        rewritten = rewrite_path(path, absolute: !url.start_with?('/'), url: url)
-        return destination unless rewritten
-
-        bracketed ? "<#{rewritten}>" : rewritten
-      end
-
-      def rewrite_path(path, absolute:, url:)
-        if (match = path.match(%r{\A/attachments/(?<kind>download/|thumbnail/)?(?<id>\d+)(?<rest>(?:[/?#].*)?)\z}))
+          finish = match.end(0)
+          bare = use['tag'] == 'a' && use['text'].include?(@sentinel)
+          if bare
+            # The autolink ends where Redmine ended it (trailing punctuation).
+            shown = use['text'].sub(@sentinel, match[:id])
+            index = @text.index(shown, start)
+            finish = start + shown.length if index == start
+          end
+          kind = match[:kind].start_with?('issues') ? 'item' : 'attachment'
           id = match[:id].to_i
+          rest = @text[match.end(:id)...finish]
+          operation = match[:operation].to_s
+          replacement = bare ? bare_replacement(kind, id, operation, rest) : path_replacement(kind, id, operation, rest, absolute)
+          edits << [start, finish, replacement] if replacement
+        end
+        edits
+      end
+
+      def path_replacement(kind, id, operation, rest, absolute)
+        if kind == 'attachment'
           if @attachment.call(id)
-            event('attachment', id: id, absolute: absolute)
-            "/attachments/#{match[:kind]}#{ATTACHMENT}#{id}#{match[:rest]}"
+            event('attachment', id: id, absolute: absolute, form: 'path')
+            "/attachments/#{operation}#{ATTACHMENT}#{id}#{rest}"
           else
             event('attachment_broken', id: id, absolute: absolute)
-            "/attachments/#{match[:kind]}0#{match[:rest]}"
+            "/attachments/#{operation}0#{rest}"
           end
-        elsif (match = path.match(%r{\A/issues/(?<id>\d+)(?<rest>(?:[/?#].*)?)\z}))
-          id = match[:id].to_i
-          if @item.call(id)
-            event('issue_url', id: id, absolute: absolute, form: 'path')
-            "/issues/#{ITEM}#{id}#{match[:rest]}"
-          else
-            # In the new instance that number is another item, or none.
-            event('issue_url_broken', id: id, absolute: absolute)
-            "/issues/0#{match[:rest]}"
-          end
+        elsif @item.call(id)
+          event('issue_url', id: id, absolute: absolute, form: 'path')
+          "/issues/#{ITEM}#{id}#{rest}"
         else
-          event('old_host_kept', url: url) if absolute
+          event('issue_url_broken', id: id, absolute: absolute)
+          "/issues/0#{rest}"
+        end
+      end
+
+      # A URL in the text, outside any link. In Markdown it becomes a
+      # reference ("#id", with its note) or, when that cannot hold it, a link
+      # with a relative path; without formatting only a plain item URL can
+      # become a reference, anything else stays and is reported.
+      def bare_replacement(kind, id, operation, rest)
+        if kind == 'item'
+          note = rest.match(/\A#(note-\d+)\z/)
+          unless @item.call(id)
+            event('item_neutralized', id: id)
+            return "!##{id}#{note ? "##{note[1]}" : ''}"
+          end
+          if rest.empty? || note
+            event('issue_url', id: id, absolute: true, form: 'reference')
+            return "##{ITEM}#{id}#{note ? "##{note[1]}" : ''}"
+          end
+          return nil.tap { event('old_host_kept', url: "/issues/#{id}#{rest}") } unless @formatting == 'markdown'
+
+          event('issue_url', id: id, absolute: true, form: 'link')
+          "[##{ITEM}#{id}](/issues/#{ITEM}#{id}#{rest})"
+        else
+          return nil.tap { event('old_host_kept', url: "/attachments/#{operation}#{id}#{rest}") } unless @formatting == 'markdown'
+
+          name = rest[%r{\A/([^/?#]+)}, 1]
+          label = name ? URI.decode_www_form_component(name) : "attachment #{id}"
+          if @attachment.call(id)
+            event('attachment', id: id, absolute: true, form: 'link')
+            "[#{label}](/attachments/#{operation}#{ATTACHMENT}#{id}#{rest})"
+          else
+            event('attachment_broken', id: id, absolute: true)
+            "[#{label}](/attachments/#{operation}0#{rest})"
+          end
+        end
+      rescue ArgumentError
+        nil
+      end
+
+      # Links of the old instance to anything else (projects, wiki...) stay.
+      def report_other_old_host_links
+        Redmine42.destinations(@base).each do |use|
+          path = @host.path(use['url'])
+          next unless path && !path.match?(%r{\A/(?:attachments/(?:download/|thumbnail/)?\d|issues/\d)})
+
+          event('old_host_kept', url: use['url'])
+        end
+      end
+
+      # --- destinations with spaces (Redcarpet only) ---------------------
+
+      # A destination that Redcarpet took with its spaces (it is the src or
+      # href of the rendering) and that CommonMark would not take: written
+      # between "<" and ">", with the links inside it already rewritten.
+      def angle_edits(edits)
+        @text.to_enum(:scan, MARKDOWN_LINK).each do
+          match = Regexp.last_match
+          start = match.begin(:inner)
+          finish = match.end(:inner)
+          inner = match[:inner]
+          # Redcarpet took this very destination: digits put in front of it
+          # show in a src or href of the rendering, and nothing else changes.
+          probed = Redmine42.to_html(@text.dup.insert(start + inner[/\A\s*/].length, @sentinel), @formatting)
+          next unless probed.gsub(@sentinel, '') == @base &&
+                      Redmine42.destinations(probed).any? { |use| use['url'].start_with?(@sentinel) }
+
+          inside = edits.select { |from, to, _replacement| from >= start && to <= finish }
+          next if edits.any? { |from, to, _replacement| from < finish && to > start && !inside.include?([from, to, _replacement]) }
+
+          rewritten = apply(inner, inside.map { |from, to, replacement| [from - start, to - start, replacement] })
+          next unless rewritten.match?(ANGLE_DESTINATION)
+
+          destination = rewritten.strip
+          next unless destination.include?(' ') && !destination.match?(/\A[a-z][a-z0-9+.-]*:/i)
+
+          edits -= inside
+          edits << [start, finish, "<#{destination}>"]
+          event('angle', destination: destination)
+        end
+        edits
+      end
+
+      # --- references (#id, ##id, user#id) --------------------------------
+
+      def reference_edits(edits)
+        @text.to_enum(:scan, /#(\d+)/).map { Regexp.last_match }.each do |match|
+          start = match.begin(1)
+          finish = match.end(1)
+          digits = match[1]
+          next if overlaps?(edits, start, finish)
+          # Redmine links an item only by its canonical id ("#012" is text).
+          next if digits.length > 1 && digits.start_with?('0')
+
+          html = probe(@text, start, finish)
+          unless html
+            event('undecided', id: digits.to_i)
+            next
+          end
+          reference = Redmine42.references(html).find { |found| found['identifier'] == @sentinel }
+          next unless reference && reference['sep'].start_with?('#')
+          next if reference['esc']
+
+          edit = reference_edit(start, finish, digits.to_i, reference)
+          edits << edit if edit
+        end
+      end
+
+      def reference_edit(start, finish, id, reference)
+        case reference['prefix']
+        when nil
+          return [start, finish, "#{ITEM}#{id}"].tap { event('item', id: id) } if @item.call(id)
+
+          escape(start, finish, id, reference, 'item_neutralized')
+        when 'user'
+          return [start, finish, "#{USER}#{id}"].tap { event('user', id: id) } if @user.call(id)
+
+          escape(start, finish, id, reference, 'user_neutralized')
+        else
+          event('other_reference', prefix: reference['prefix'], id: id)
           nil
         end
       end
 
-      # A URL in the text, outside any link: a link to an item of the old
-      # instance becomes a reference to it ("#id"), one to an attachment a
-      # Markdown link with its file name. Any other URL stays.
-      def bare_url(url)
-        trailing = url[/[.,;:!?]+\z/].to_s
-        core = url[0, url.length - trailing.length]
-        path = @host.path(core)
-        return url unless path
-
-        if (match = path.match(%r{\A/issues/(?<id>\d+)(?<note>#note-\d+)?\z}))
-          id = match[:id].to_i
-          unless @item.call(id)
-            event('item_neutralized', id: id)
-            return "!##{id}#{match[:note]}#{trailing}"
-          end
-          event('issue_url', id: id, absolute: true, form: 'reference')
-          "##{ITEM}#{id}#{match[:note]}#{trailing}"
-        elsif (match = path.match(%r{\A/attachments/(?:download/|thumbnail/)?(?<id>\d+)(?:/(?<name>[^/?#]+))?}))
-          name = match[:name] || "attachment #{match[:id]}"
-          destination = rewrite_path(path, absolute: true, url: core)
-          "[#{name}](#{destination})#{trailing}"
+      # A reference that must not link in the new instance is escaped with
+      # "!" before it, as Redmine escapes; checked by rendering it again.
+      def escape(start, finish, id, reference, kind)
+        position = start
+        reference['sep'].length.times do
+          position -= 1 while position.positive? && @text[position - 1] == '\\'
+          position -= 1 if position.positive? && @text[position - 1] == '#'
+        end
+        position -= 1 while position.positive? && @text[position - 1] == '\\'
+        [reference['prefix'], reference['project_prefix']].compact.each do |part|
+          position -= part.length if @text[position - part.length, part.length] == part
+        end
+        escaped = @text.dup.insert(position, '!')
+        html = Redmine42.to_html(escaped[0...(start + 1)] + @sentinel + escaped[(finish + 1)..].to_s, @formatting)
+        if Redmine42.references(html).none? { |found| found['identifier'] == @sentinel && !found['esc'] }
+          event(kind, id: id)
+          [position, position, '!']
         else
-          event('old_host_kept', url: core)
-          url
+          event('undecided', id: id)
+          nil
         end
       end
 
-      # The start of a part counts as a start when nothing came before, or a
-      # construct that Redmine renders as a tag (it ends in ">"), or a
-      # character that REFERENCE accepts before a reference.
-      def rewrite_references(text, previous, after_construct)
-        return text if text.empty?
+      # --- texts that already hold something like a placeholder ------------
 
-        lead = previous.nil? || after_construct || previous.match?(/[\s(,\-\[>]/) ? '' : 'x'
-        rewritten = (lead + text).gsub(REFERENCE) { reference(Regexp.last_match) }
-        rewritten[lead.length..]
-      end
+      def lookalike_edits(edits)
+        @text.to_enum(:scan, /#{LOOKALIKE}/o).each do
+          start = Regexp.last_match.begin(0)
+          finish = start + LOOKALIKE.length
+          next if overlaps?(edits, start, finish)
 
-      def reference(match)
-        token = match[0]
-        id = match[:id].to_i
-        return token if match[:esc]
-
-        case match[:prefix]
-        when nil
-          if @item.call(id)
-            event('item', id: id)
-            "#{match[:project]}#{match[:sep][0..-2]}##{ITEM}#{id}#{match[:suffix]}"
-          else
-            event('item_neutralized', id: id)
-            "!#{token}"
-          end
-        when 'user'
-          return token unless match[:sep] == '#'
-
-          if @user.call(id)
-            event('user', id: id)
-            "#{match[:project]}user##{USER}#{id}#{match[:suffix]}"
-          else
-            event('user_neutralized', id: id)
-            "!#{token}"
-          end
-        else
-          event('other_reference', prefix: match[:prefix], id: id)
-          token
+          edits << [start, finish, ESCAPED]
+          event('lookalike')
         end
       end
 
@@ -395,19 +500,25 @@ module SnapshotsGen
     end
 
     # Replaces the placeholders with the ids of the new instance, in one
-    # pass. The callables return the new id, or nil when it is unknown.
+    # pass, and restores what the source already held that looked like one.
+    # The callables return the new id, or nil when it is unknown.
     class Resolver
       PATTERN = %r{
         (?<item>(?<item_lead>\#|/issues/)#{ITEM}(?<item_id>\d+))|
-        (?<user>user\##{USER}(?<user_id>\d+))|
+        (?<user>user(?<user_sep>\#\#?)#{USER}(?<user_id>\d+))|
         (?<attachment>/attachments/(?<kind>download/|thumbnail/)?#{ATTACHMENT}(?<attachment_id>\d+))|
-        (?<literal>\##{LITERAL}(?<literal_id>\d+))
+        (?<literal>\##{LITERAL}(?<literal_id>\d+))|
+        (?<escaped>#{ESCAPED})
       }x.freeze
+
+      # How many escaped lookalikes it has restored.
+      attr_reader :restored
 
       def initialize(item:, user:, attachment:)
         @item = item
         @user = user
         @attachment = attachment
+        @restored = 0
       end
 
       def resolve(text)
@@ -420,14 +531,17 @@ module SnapshotsGen
             if id
               "#{match[:item_lead]}#{id}"
             else
-              match[:item_lead] == '#' ? "!##{match[:item_id]}" : "/issues/0"
+              match[:item_lead] == '#' ? "!##{match[:item_id]}" : '/issues/0'
             end
           elsif match[:user]
-            "user##{@user.call(match[:user_id].to_i) || 0}"
+            "user#{match[:user_sep]}#{@user.call(match[:user_id].to_i) || 0}"
           elsif match[:attachment]
             "/attachments/#{match[:kind]}#{@attachment.call(match[:attachment_id].to_i) || 0}"
-          else
+          elsif match[:literal]
             "##{match[:literal_id]}"
+          else
+            @restored += 1
+            LOOKALIKE
           end
         end
       end

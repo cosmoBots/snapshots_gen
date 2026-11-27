@@ -183,19 +183,19 @@ class CompareHistoryTest < Minitest::Test
     host = { 'entries' => [{ 'code' => 'source_host', 'subject' => 'old.example.test', 'detail' => { 'protocol' => 'https' } },
                            { 'code' => 'text_formatting', 'subject' => nil, 'detail' => { 'value' => 'markdown' } }] }
     source, target = item, item(101)
-    source['journals'] = [journal([], 'Asked user#20: ![](https://old.example.test/attachments/download/7/a b.png)')]
-    target['journals'] = [journal([], 'Asked user#57: ![](</attachments/download/507/a b.png>)', 101)]
-    source['text_refs'] = { 'users' => { '20' => 'ana' }, 'attachments' => { '7' => ['a b.png', 'd1'] } }
-    target['text_refs'] = { 'users' => { '57' => 'ana' }, 'attachments' => { '507' => ['a b.png', 'd1'] } }
+    source['journals'] = [journal([], 'Asked user#20: ![](https://old.example.test/attachments/download/7/a_b.png)')]
+    target['journals'] = [journal([], 'Asked user#57: ![](/attachments/download/507/a_b.png)', 101)]
+    source['text_refs'] = { 'users' => { '20' => 'ana' }, 'attachments' => { '7' => ['a_b.png', 'd1'] } }
+    target['text_refs'] = { 'users' => { '57' => 'ana' }, 'attachments' => { '507' => ['a_b.png', 'd1'] } }
     assert compare(source, target, host).ok?
     # Another person, another file or the old host are failures.
     target['text_refs']['users']['57'] = 'bob'
     refute compare(source, target, host).ok?
     target['text_refs']['users']['57'] = 'ana'
-    target['text_refs']['attachments']['507'] = ['a b.png', 'other']
+    target['text_refs']['attachments']['507'] = ['a_b.png', 'other']
     refute compare(source, target, host).ok?
-    target['text_refs']['attachments']['507'] = ['a b.png', 'd1']
-    target['journals'][0]['notes'] = 'Asked user#57: ![](https://old.example.test/attachments/download/7/a b.png)'
+    target['text_refs']['attachments']['507'] = ['a_b.png', 'd1']
+    target['journals'][0]['notes'] = 'Asked user#57: ![](https://old.example.test/attachments/download/7/a_b.png)'
     refute compare(source, target, host).ok?
   end
 

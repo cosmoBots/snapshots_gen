@@ -48,7 +48,7 @@ class ConverterTextLinksTest < Minitest::Test
       'documents' => [{ 'id' => 1, 'project_id' => 1, 'title' => 'Doc', 'description' => 'About #3', 'category_id' => nil,
                         'created_on' => TIME }],
       'journals' => [{ 'id' => 20, 'journalized_id' => 1, 'journalized_type' => 'Issue', 'user_id' => 1,
-                       'notes' => "user#1 and user#77 on #3 ![](#{HOST}/attachments/download/10/a b.png)",
+                       'notes' => "user#1 and user#77 on #3 ![](/attachments/download/10/a b.png)",
                        'private_notes' => false, 'created_on' => TIME }],
       'journal_details' => [
         { 'id' => 30, 'journal_id' => 20, 'property' => 'attr', 'prop_key' => 'description', 'old_value' => 'Was #2',
@@ -60,7 +60,7 @@ class ConverterTextLinksTest < Minitest::Test
   end
 
   DESCRIPTION = "Depends on #2 and #3, not on #99. Code `#2`.\n" \
-                "![](#{HOST}/attachments/download/10/a b.png) ![](#{HOST}/attachments/download/11/gone.png)\n" \
+                "![](/attachments/download/10/a b.png) ![](#{HOST}/attachments/download/11/gone.png)\n" \
                 "[the other](#{HOST}/issues/3), #{HOST}/issues/2 and user#1, user#77, #{HOST}/projects/beta"
 
   def test_every_text_gets_placeholders

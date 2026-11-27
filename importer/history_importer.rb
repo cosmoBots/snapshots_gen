@@ -953,9 +953,21 @@ module SnapshotsGen
           [where, count] if count.positive?
         end
         # The data of a wiki version is binary (bytea): read it as Redmine does.
-        versions = WikiContentVersion.where(page_id: @page_map.values).to_a.count { |version| version.text.to_s.match?(TextLinks::LEFTOVER) }
+        version_texts = WikiContentVersion.where(page_id: @page_map.values).to_a.map { |version| version.text.to_s }
+        versions = version_texts.count { |text| text.match?(TextLinks::LEFTOVER) }
         found << ['wiki_content_versions.data', versions] if versions.positive?
-        found
+        # Texts of the source that already held something like a placeholder
+        # were escaped by the converter and restored here: as many as were
+        # restored may remain, and no more.
+        restored = @resolver ? @resolver.restored : 0
+        return found unless restored.positive? && found.any?
+
+        remaining = version_texts.sum { |text| text.scan(TextLinks::LEFTOVER).length } +
+                    checks.sum do |_where, (scope, column)|
+                      scope.where(placeholder_condition(scope.model.arel_table[column])).pluck(column)
+                           .sum { |text| text.to_s.scan(TextLinks::LEFTOVER).length }
+                    end
+        remaining <= restored ? [] : found
       end
 
       # Renders every imported detail as Redmine does and looks for labels

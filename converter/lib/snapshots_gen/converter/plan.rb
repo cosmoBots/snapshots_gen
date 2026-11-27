@@ -936,7 +936,8 @@ module SnapshotsGen
           target && root_of(target.project_id) == protect_root
         end
         rewriter = TextLinks::Rewriter.new(
-          item: ->(id) { @items_by_source_id.key?(id) }, user: ->(id) { @users.key?(id) },
+          # Redmine 4.2 linked user#id only for a user of type User.
+          item: ->(id) { @items_by_source_id.key?(id) }, user: ->(id) { @users.dig(id, 'type') == 'User' },
           attachment: ->(id) { attachment_containers.key?(id) }, host: source_host, markdown: markdown,
           angle: markdown && redcarpet_source?, protect: protect
         )
@@ -1061,6 +1062,8 @@ module SnapshotsGen
           when 'issue_url_broken' then report.add('item_link_broken', subject, reference: id, absolute: event['absolute'], **where)
           when 'old_host_kept' then report.add('old_host_link_kept', subject, url: event['url'], **where)
           when 'angle' then report.add('link_destination_bracketed', subject, destination: event['destination'], **where)
+          when 'undecided' then report.add('reference_undecided', subject, reference: id, **where)
+          when 'lookalike' then report.add('placeholder_lookalike', subject, **where)
           end
         end
       end

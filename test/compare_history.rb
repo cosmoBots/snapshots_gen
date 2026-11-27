@@ -243,7 +243,9 @@ module HistoryComparison
       source_refs = refs(old)
       target_refs = refs(new)
       rewriter = TextLinks::Rewriter.new(
-        item: ->(id) { @ids.key?(id) }, user: ->(id) { !source_refs['users'][id.to_s].nil? },
+        item: ->(id) { @ids.key?(id) },
+        # Redmine 4.2 linked user#id only for a user of type User.
+        user: ->(id) { (login = source_refs['users'][id.to_s]) && !login.start_with?('(') },
         attachment: ->(id) { !target_attachments(source_refs, target_refs, id).empty? },
         host: @host, markdown: markdown, angle: markdown && @angle
       )

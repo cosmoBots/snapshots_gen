@@ -79,15 +79,21 @@ class TextLinksTest < Minitest::Test
   end
 
   def test_attachment_urls_of_the_old_instance
-    text = '![](https://old.example.test/attachments/download/7/a (1).png) [doc](https://OLD.example.test/attachments/70)'
+    text = '![](https://old.example.test/attachments/download/7/a(1).png) [doc](https://OLD.example.test/attachments/70)'
     converted = rewrite(text)
-    assert_equal '![](/attachments/download/snapshots-gen-attachment-7/a (1).png) [doc](/attachments/snapshots-gen-attachment-70)'
-                   .sub('(/attachments/download/snapshots-gen-attachment-7/a (1).png)', '(</attachments/download/snapshots-gen-attachment-7/a (1).png>)'),
-                 converted
-    assert_equal '![](</attachments/download/507/a (1).png>) [doc](/attachments/570)', resolve(converted)
-    # Thumbnails, relative paths and HTML attributes.
-    assert_equal '<img src="/attachments/thumbnail/507/200"> [x](/attachments/download/570/x.pdf)',
-                 resolve(rewrite('<img src="https://old.example.test/attachments/thumbnail/7/200"> [x](/attachments/download/70/x.pdf)'))
+    assert_equal '![](/attachments/download/snapshots-gen-attachment-7/a(1).png) [doc](/attachments/snapshots-gen-attachment-70)', converted
+    assert_equal '![](/attachments/download/507/a(1).png) [doc](/attachments/570)', resolve(converted)
+    # A relative path with spaces: Redcarpet took it, CommonMark needs <...>.
+    assert_equal '![](</attachments/download/507/a (1).png>)', resolve(rewrite('![](/attachments/download/7/a (1).png)'))
+    # With a scheme and a space Redcarpet made no image, only an autolink of
+    # the URL up to the space: that is what is kept.
+    assert_equal '![]([a](/attachments/download/507/a) b.png)', resolve(rewrite('![](https://old.example.test/attachments/download/7/a b.png)'))
+    # Thumbnails and relative paths. HTML is not rendered by Redmine 4.2's
+    # Markdown (filter_html): an <img> there was never an image, and stays.
+    assert_equal '![](/attachments/thumbnail/507/200) [x](/attachments/download/570/x.pdf)',
+                 resolve(rewrite('![](https://old.example.test/attachments/thumbnail/7/200) [x](/attachments/download/70/x.pdf)'))
+    html = '<img src="https://old.example.test/attachments/thumbnail/7/200">'
+    assert_equal html, rewrite(html)
     # An attachment that does not reach the new instance never names another one.
     assert_equal '![](/attachments/download/0/gone.png)', rewrite('![](https://old.example.test/attachments/download/8/gone.png)')
     assert_equal %w[attachment_broken], events('![](https://old.example.test/attachments/download/8/gone.png)')
@@ -137,6 +143,68 @@ class TextLinksTest < Minitest::Test
     end
     assert_equal "`漢字 #12` end #snapshots-gen-item-12", rewrite("`漢字 #12` end #12")
     assert_equal "`é` tail", rewrite("`é` tail")
+  end
+
+  # What Redmine 4.2 linked (Redcarpet with its formatter's options, then
+  # parse_redmine_links on the HTML outside pre and code), case by case.
+  def test_references_are_what_redmine_4_2_linked
+    {
+      '_#12' => '_#12',                            # literal: the underline never closes
+      '|#12|' => '|#12|',                          # literal
+      '***#12***' => '***#1012***',                # <strong><em>#12</em></strong>
+      '\\#12' => '\\#1012',                        # Redcarpet drops the backslash
+      '#012' => '#012',                            # only the canonical id links
+      'user##20' => 'user##120',                   # "##" also for users
+      '<code>#12</code>' => '<code>#1012</code>',  # filter_html removes the tag
+      '`#12`' => '`#12`',                          # inline code
+      "    #12\n" => "    #12\n",                  # indented code
+      "```\n#12\n```\n" => "```\n#12\n```\n",      # fenced code
+      'proj:#12, !#12 and #12-3' => 'proj:#1012, !#12 and #1012-3',
+      '{{toc(#12)}} #12' => '{{toc(#12)}} #1012'   # macros are set apart first
+    }.each { |text, expected| assert_equal expected, resolve(rewrite(text)), text }
+  end
+
+  # The key of a Markdown reference link or image is not a Redmine
+  # reference: changing it would part the use from its definition.
+  def test_markdown_reference_labels_are_kept
+    text = "![diagram][#12] and [text][#12]\n\n[#12]: image.png\n"
+    assert_equal text, rewrite(text)
+    assert_equal %w[undecided undecided undecided], events(text)
+  end
+
+  # Indented code is code in both formatters: neither angles nor references.
+  def test_indented_code_is_never_rewritten
+    text = "Text\n\n    ![](a b.png)\n    #12\n"
+    assert_equal text, rewrite(text)
+    # A nested list is not code: its reference is rewritten.
+    assert_equal "- a\n    - b #1012\n", resolve(rewrite("- a\n    - b #12\n"))
+  end
+
+  def test_urls_of_the_old_instance_in_every_form
+    host = 'old.example.test'
+    {
+      "https://#{host}/issues/12?x=1" => '[#1012](/issues/1012?x=1)',
+      "https://#{host}/issues/12#foo" => '[#1012](/issues/1012#foo)',
+      "https://#{host}/issues/12#note-3" => '#1012#note-3',
+      "[x](https://#{host}:443/issues/12)" => '[x](/issues/1012)',
+      "[x](http://#{host}:80/issues/12)" => '[x](/issues/1012)',
+      "[x](//#{host}/issues/12)" => '[x](/issues/1012)',
+      "[x](https://#{host}:8443/issues/12)" => "[x](https://#{host}:8443/issues/12)"
+    }.each { |text, expected| assert_equal expected, resolve(rewrite(text)), text }
+    # A path prefix in host_name.
+    prefixed = TL::Host.new("#{host}/redmine")
+    assert_equal '[x](/issues/1012)', resolve(rewrite("[x](https://#{host}/redmine/issues/12)", host: prefixed))
+    assert_equal "[x](https://#{host}/other/issues/12)", rewrite("[x](https://#{host}/other/issues/12)", host: prefixed)
+  end
+
+  # A source text that already holds something like a placeholder keeps it.
+  def test_lookalikes_survive_the_round_trip
+    resolver = TL::Resolver.new(item: ->(id) { id + 1000 }, user: ->(id) { id }, attachment: ->(id) { id })
+    ['`#snapshots-gen-item-12`', 'user#snapshots-gen-user-3 and snapshots-gen-esc-x', '#12 and snapshots-gen-hash-4'].each do |text|
+      assert_equal text.sub('#12 ', '#1012 '), resolver.resolve(rewrite(text)), text
+    end
+    assert_equal 1, TL::Resolver.new(item: ->(id) { id }, user: ->(id) { id }, attachment: ->(id) { id })
+                                .tap { |r| r.resolve(rewrite('`#snapshots-gen-item-12`')) }.restored
   end
 
   def test_other_prefixes_are_counted_and_kept
