@@ -103,7 +103,7 @@ The following values are redacted (written as `null` and listed in `redacted_col
 - `auth_sources.account_password` and `repositories.password`: service credentials.
 - `settings.value` when the setting name or its stored value mentions an API key, a password, a secret or a token.
 
-`users.hashed_password` and `users.salt` are exported on purpose: Redmine 4.2.10 and 7.0.1 hash passwords the same way, so users keep their passwords. This makes every package confidential. It must be stored and moved like a database backup, and deleted when the migration is done.
+`users.hashed_password` and `users.salt` are exported on purpose: Redmine 4.2.10 and 7.0.1 hash passwords the same way, so users keep their passwords. This makes every package confidential. It must be stored and moved like a database backup, and deleted when the migration is done. "Material sensible" in the [migration procedure](procedimiento-migracion.md#material-sensible) (in Spanish) lists what every file of the migration carries and how to keep, move and delete it.
 
 ## Assets
 

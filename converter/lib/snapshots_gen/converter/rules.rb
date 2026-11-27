@@ -73,6 +73,10 @@ module SnapshotsGen
         'csWload' => { 'field' => 'cs_wload', 'requirement' => false }
       }.freeze
 
+      # Native profile fields that hold formatted text: their links are
+      # rewritten like a description's.
+      TEXT_NATIVE_FIELDS = %w[rq_rationale rq_srcs rq_compl_justif rq_verif_description].freeze
+
       DROPPED_ISSUE_FIELDS = {
         'csID' => 'copy of the old internal identifier; the item keeps it as its native CSID',
         'csChapter' => 'copy of the old chapter number; the current cosmoSys computes chapters',
@@ -105,6 +109,8 @@ module SnapshotsGen
         user_preferences users versions watchers wiki_content_versions wiki_contents wiki_pages wiki_redirects wikis
         workflows
       ].freeze
+      # Tables of the old tag plugin (additional_tags), carried by the .cstags.
+      TAG_TABLES = %w[additional_tags additional_taggings].freeze
       COSMOSYS_TABLES = %w[
         cosmosys_issues cosmosys_projects cosmosys_trackers cosmosys_users cosmosys_versions cosmosys_documents
         cosmosys_project_gits csys_reqs csys_poris
@@ -138,6 +144,9 @@ module SnapshotsGen
         value.to_s.dup.force_encoding('UTF-8').encode('UTF-8', invalid: :replace, undef: :replace, replace: '')
              .delete("\u0000")
       end
+
+      # The only project codes (and so CSID prefixes) cosmoSys accepts.
+      CODE_PATTERN = /\A[A-Za-z0-9]+\z/.freeze
 
       def normalize_code(code)
         code.to_s.gsub(/[^a-zA-Z0-9]/, '')

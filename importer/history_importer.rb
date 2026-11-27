@@ -5,15 +5,24 @@ require 'set'
 require 'tmpdir'
 require 'zip'
 require_relative '../exporter/legacy_snapshot_format'
+require_relative '../converter/lib/snapshots_gen/text_links'
 
 module SnapshotsGen
   module Importer
     class Error < StandardError; end
 
-    PLACEHOLDER = /#snapshots-gen-item-(\d+)/.freeze
     DEFAULT_ROLE_MAP = {
       'rqMngr' => 'Manager', 'rqWriter' => 'Developer', 'rqReviewer' => 'Developer', 'rqReader' => 'Reporter'
     }.freeze
+    # The destination of a source role given to members (Role.builtin 0): a
+    # role with the same name, or the one DEFAULT_ROLE_MAP or roles=old:new
+    # names. The history import maps memberships with it and the tags import
+    # gives tag permissions with it, so both always agree.
+    def self.role_target(name, overrides = {})
+      mapping = DEFAULT_ROLE_MAP.merge(overrides || {})
+      Role.where(builtin: 0, name: name).first || (mapping[name] && Role.where(builtin: 0, name: mapping[name]).first)
+    end
+
     CUSTOM_FIELD_CLASSES = %w[IssueCustomField ProjectCustomField VersionCustomField UserCustomField
                               GroupCustomField TimeEntryCustomField DocumentCustomField].freeze
 
@@ -67,6 +76,16 @@ module SnapshotsGen
       def csys_packages
         manifest.dig('content', 'csys_packages') || []
       end
+
+      # A file the package carries (the files of the Files module).
+      def asset_path(digest)
+        raise Error, "invalid SHA-256 #{digest.inspect}" unless digest.to_s.match?(/\A[0-9a-f]{64}\z/)
+
+        path = File.join(@directory, 'assets', 'sha256', digest)
+        raise Error, "the history package does not carry the file #{digest}" unless File.file?(path)
+
+        path
+      end
     end
 
     # The three steps of the import in the new instance.
@@ -116,6 +135,7 @@ module SnapshotsGen
           resolve_documents!
           resolve_wiki_pages!
           resolve_attachments!
+          import_project_files!
           import_journals!
           import_wiki_versions!
           import_time_entries!
@@ -125,7 +145,8 @@ module SnapshotsGen
           restore_containers!
           restore_projects!
           import_deferred_values!
-          replace_description_placeholders!
+          replace_text_placeholders!
+          capture_presentation_baselines!
           problems = verify!
           raise Error, "verification failed, nothing was written:\n#{problems.join("\n")}" if problems.any?
           raise ActiveRecord::Rollback if @options['dry_run']
@@ -134,8 +155,13 @@ module SnapshotsGen
         summary
       end
 
+      # The history-import-*.json report. Everything in "dropped" was in the
+      # history package, so the conversion report did not announce it.
       def summary
-        { 'stats' => @stats.sort.to_h, 'dropped' => @dropped, 'log' => @log }
+        { 'format' => 'snapshots_gen-history-import-v1', 'dry_run' => @options['dry_run'] ? true : false,
+          'stats' => @stats.sort.to_h, 'dropped' => @dropped,
+          'dropped_counts' => @dropped.group_by { |entry| entry['kind'] }.transform_values(&:length).sort.to_h,
+          'log' => @log }
       end
 
       private
@@ -251,6 +277,10 @@ module SnapshotsGen
               editable: row['editable'].nil? ? true : flag(row['editable']), regexp: row['regexp'],
               min_length: row['min_length'], max_length: row['max_length']
             )
+            # The format options, such as a text field's full formatting:
+            # without them its Markdown would show as plain text.
+            stored = row['format_store']
+            field.format_store = field.format_store.to_h.merge(stored) if stored.is_a?(Hash) && stored.any?
             if field.respond_to?(:tracker_ids=)
               field.tracker_ids = Tracker.where(name: row['trackers']).pluck(:id)
             end
@@ -260,6 +290,7 @@ module SnapshotsGen
             @stats['created_custom_fields'] += 1
             say "Created custom field #{row['name']} (#{klass}, #{row['field_format']})#{row['computed'] ? ', its formula is not kept' : ''}"
           else
+            check_field_format!(field, row)
             if field.respond_to?(:tracker_ids=)
               missing = Tracker.where(name: row['trackers']).pluck(:id) - field.tracker_ids
               field.update!(tracker_ids: field.tracker_ids + missing) if missing.any?
@@ -268,6 +299,25 @@ module SnapshotsGen
           end
           @field_map[row['id']] = field.id
         end
+      end
+
+      # Options that decide how a value renders. A field that already exists
+      # with other ones (made by an earlier version of this importer, or by
+      # hand) would show the migrated values differently: refused, since the
+      # import always goes into a new instance.
+      RENDERING_OPTIONS = %w[text_formatting url_pattern].freeze
+
+      def check_field_format!(field, row)
+        stored = row['format_store']
+        return unless stored.is_a?(Hash)
+
+        current = field.format_store.to_h.transform_keys(&:to_s)
+        different = RENDERING_OPTIONS.select { |key| stored.key?(key) && current[key].to_s != stored[key].to_s }
+        return if different.empty?
+
+        raise Error, "custom field #{field.name} already exists with other options (" +
+                     different.map { |key| "#{key}: #{current[key].inspect} here, #{stored[key].inspect} in the package" }.join('; ') +
+                     '); the history import expects a new instance'
       end
 
       def ensure_activities!
@@ -297,8 +347,7 @@ module SnapshotsGen
       end
 
       def role_target(name)
-        mapping = DEFAULT_ROLE_MAP.merge(@options.fetch('roles', {}))
-        Role.where(builtin: 0, name: name).first || (mapping[name] && Role.where(builtin: 0, name: mapping[name]).first)
+        Importer.role_target(name, @options.fetch('roles', {}))
       end
 
       # --- projects and items --------------------------------------------------
@@ -316,6 +365,7 @@ module SnapshotsGen
       def resolve_items!
         @item_map = {}
         @issue_key = {}
+        @csid_by_key = {}
         missing = []
         rows = @package.rows('items')
         by_project = Issue.where(project_id: @project_map.values).pluck(:project_id, :csid, :id)
@@ -324,6 +374,7 @@ module SnapshotsGen
           id = by_project.fetch(@project_map.fetch(row['project_id']), {})[row['csid'].to_s.downcase]
           id ? @item_map[row['key']] = id : missing << "#{row['key']} (#{row['csid']})"
           @issue_key[row['id']] = row['key'] if row['id'].to_i.positive?
+          @csid_by_key[row['key']] = row['csid']
         end
         raise Error, "items not found in the new instance: #{missing.first(20).join(', ')}" if missing.any?
       end
@@ -463,6 +514,8 @@ module SnapshotsGen
           by_container[[row['container'], row['container_key']]] << row
         end
         by_container.each do |(type, key), rows|
+          next if %w[project version].include?(type)
+
           container_type, container_id = case type
                                          when 'item' then ['Issue', @item_map.fetch(key)]
                                          when 'document' then ['Document', @document_map.fetch(key)]
@@ -480,6 +533,38 @@ module SnapshotsGen
         end
       end
 
+      # The files of the Files module, of a project or of one of its
+      # versions: the .csys cannot carry them, so they travel in the history
+      # package and are created here, in the same order as in the source.
+      # Their author, date, description and downloads are restored with the
+      # other attachments (restore_containers!).
+      def import_project_files!
+        rows = @package.rows('attachments').select { |row| row['migrated'] && %w[project version].include?(row['container']) }
+        rows.sort_by { |row| [row['container'], row['container_key'].to_i, row['ordinal']] }.each do |row|
+          container = if row['container'] == 'project'
+                        Project.find(@project_map.fetch(row['container_key'].to_i))
+                      else
+                        Version.find(@version_map.fetch(row['container_key'].to_i) { raise Error, "version #{row['container_key']} was not imported" })
+                      end
+          # A second confirmed import would add every file again.
+          if Attachment.where(container: container, filename: row['filename'], digest: row['sha256']).exists?
+            raise Error, "the file #{row['filename']} of #{container.class.name.downcase} #{container.id} is already here: " \
+                         'the history of this package was imported before'
+          end
+          attachment = File.open(@package.asset_path(row['sha256']), 'rb') do |file|
+            Attachment.create!(container: container, author: User.find_by(id: user_id(row['author_id'])) || User.anonymous,
+                               file: file, filename: row['filename'], content_type: row['content_type'],
+                               description: row['description'])
+          end
+          unless attachment.digest == row['sha256'] && attachment.filesize == row['bytes'].to_i
+            raise Error, "file #{row['id']} (#{row['filename']}) changed on its way into the new instance"
+          end
+
+          @attachment_map[row['id']] = attachment.id
+          @stats['project_files'] += 1
+        end
+      end
+
       # --- journals --------------------------------------------------------------
 
       def import_journals!
@@ -488,10 +573,12 @@ module SnapshotsGen
         @detail_count = 0
         @package.rows('journals').sort_by { |row| [row['created_on'].to_s, row['id']] }.each do |row|
           issue_id = @item_map.fetch(row['item_key'])
-          translated = Array(details[row['id']]).sort_by { |detail| detail['id'] }.filter_map { |detail| translate(detail, issue_id) }
+          translated = Array(details[row['id']]).sort_by { |detail| detail['id'] }.filter_map do |detail|
+            translate(detail, issue_id, row)
+          end
           notes = placeholders(row['notes'].to_s)
           if notes.strip.empty? && translated.empty?
-            @dropped << { 'kind' => 'journal', 'id' => row['id'], 'reason' => 'no detail could be translated' }
+            @dropped << journal_entry('journal', row['id'], row, 'no detail could be translated')
             next
           end
           created = time(row['created_on'])
@@ -508,27 +595,46 @@ module SnapshotsGen
         @stats['journal_details'] = @detail_count
       end
 
-      def translate(detail, issue_id)
+      def translate(detail, issue_id, journal)
         prop_key = detail['prop_key'].to_s
         case detail['prop_ref']
         when 'attachments'
-          prop_key = @attachment_map[prop_key.to_i]&.to_s || '0'
+          # The converter already wrote id 0 (and reported it) for every
+          # attachment the item no longer has; anything else must be found.
+          prop_key = @attachment_map[prop_key.to_i]&.to_s
+          return drop_detail(detail, journal, "attachment #{detail['prop_key']} not migrated") unless prop_key
         when 'custom_fields'
           prop_key = @field_map[prop_key.to_i]&.to_s
-          return drop_detail(detail, 'custom field not created') unless prop_key
+          return drop_detail(detail, journal, 'custom field not created') unless prop_key
         end
         old_value = reference(detail['value_ref'], detail['old_value'], issue_id)
         value = reference(detail['value_ref'], detail['value'], issue_id)
-        return drop_detail(detail, "#{detail['value_ref']} #{detail['old_value'] || detail['value']} not found") if old_value == :missing || value == :missing
+        if old_value == :missing || value == :missing
+          missing = old_value == :missing ? detail['old_value'] : detail['value']
+          return drop_detail(detail, journal, "#{detail['value_ref']} #{missing} not found")
+        end
 
+        # A tag list is literal text: a tag may be named like a placeholder.
+        literal = detail['value_ref'] || tag_list?(detail['property'], prop_key)
         { 'property' => detail['property'], 'prop_key' => prop_key,
-          'old_value' => detail['value_ref'] ? old_value : placeholders(old_value),
-          'value' => detail['value_ref'] ? value : placeholders(value) }
+          'old_value' => literal ? old_value : placeholders(old_value),
+          'value' => literal ? value : placeholders(value) }
       end
 
-      def drop_detail(detail, reason)
-        @dropped << { 'kind' => 'journal_detail', 'id' => detail['id'], 'reason' => reason }
+      def tag_list?(property, prop_key)
+        property == 'attr' && prop_key == 'tag_list'
+      end
+
+      def drop_detail(detail, journal, reason)
+        @dropped << journal_entry('journal_detail', detail['id'], journal, reason)
         nil
+      end
+
+      # A dropped journal or detail, named by its source ids and the CSID of
+      # its item in the new instance.
+      def journal_entry(kind, id, journal, reason)
+        { 'kind' => kind, 'id' => id, 'reason' => reason, 'journal' => journal['id'], 'item' => journal['item_key'],
+          'csid' => @csid_by_key[journal['item_key']] }
       end
 
       # Translates one referenced value; :missing when it cannot be found.
@@ -562,13 +668,16 @@ module SnapshotsGen
         row && model.where(name: row['name']).pick(:id)
       end
 
+      # Every placeholder of the converter (SnapshotsGen::TextLinks) with the
+      # id of the new instance, in one pass: items by their source id,
+      # principals with the user map (deleted users and the anonymous user
+      # become the anonymous user), attachments with the attachment map.
       def placeholders(text)
         return text if text.nil?
 
-        text.to_s.gsub(PLACEHOLDER) do
-          id = item_id_for_source(Regexp.last_match(1))
-          id ? "##{id}" : "!##{Regexp.last_match(1)}"
-        end
+        @resolver ||= TextLinks::Resolver.new(item: ->(id) { item_id_for_source(id) }, user: ->(id) { user_id(id) },
+                                              attachment: ->(id) { @attachment_map[id] })
+        @resolver.resolve(text.to_s)
       end
 
       # --- wiki, time entries, watchers and relations -------------------------
@@ -741,10 +850,64 @@ module SnapshotsGen
         end
       end
 
-      def replace_description_placeholders!
-        Issue.where(id: @item_map.values).where('description LIKE ?', '%#snapshots-gen-item-%').find_each do |issue|
-          Issue.where(id: issue.id).update_all(description: placeholders(issue.description))
+      # The texts the .csys import wrote with placeholders: descriptions and
+      # native text fields of the items, their custom values, documents and
+      # project descriptions. The history (notes, changes, wiki) was written
+      # already resolved.
+      def replace_text_placeholders!
+        columns = %w[description] + (Issue.column_names & TEXT_COLUMNS)
+        resolve_column(Issue.where(id: @item_map.values), columns)
+        resolve_column(CustomValue.where(customized_type: 'Issue', customized_id: @item_map.values), %w[value])
+        resolve_column(Document.where(project_id: @project_map.values), %w[description])
+        resolve_column(Project.where(id: @project_map.values), %w[description])
+        resolve_column(WikiContent.where(page_id: @page_map.values), %w[text])
+      end
+
+      # Native text fields of cosmoSys Requirements that the converter fills
+      # (Rules::TEXT_NATIVE_FIELDS).
+      TEXT_COLUMNS = %w[rq_rationale rq_srcs rq_compl_justif rq_verif_description].freeze
+
+      def resolve_column(scope, columns)
+        columns.each do |column|
+          scope.where(placeholder_condition(scope.model.arel_table[column])).pluck(:id, column).each do |id, text|
+            resolved = placeholders(text)
+            next if resolved == text
+
+            scope.model.where(id: id).update_all(column => resolved)
+            @stats['texts_resolved'] += 1
+          end
         end
+      end
+
+      def placeholder_condition(attribute)
+        TextLinks::LEFTOVER_LIKE.map { |pattern| attribute.matches(pattern) }.inject(:or)
+      end
+
+      # cosmoSys keeps, for each consolidated item (a requirement past draft),
+      # the text that was approved; without it the item reads "missing
+      # evidence". The old instance had none, so they are captured here, from
+      # the final text and relations, as cosmoSys's own
+      # scripts/capture_approved_presentation_baselines.rb does for items that
+      # predate them. The .csys import does not capture them on purpose
+      # (purpose :materialization): cross-package references and relations
+      # are only complete after this step.
+      def capture_presentation_baselines!
+        return unless defined?(Cosmosys::ApprovedPresentationBaseline)
+
+        attributes = Cosmosys::ApprovedPresentationBaseline::ATTRIBUTES
+        @baseline_items = []
+        Issue.where(id: @item_map.values).includes(:tracker, :status).find_each do |issue|
+          next unless issue.cosmosys_item_kind.approved_presentation_baseline == true &&
+                      issue.status&.cosmosys_maturity_level.to_i > Cosmosys::ApprovedPresentationBaseline::CONSOLIDATED_MATURITY_FLOOR
+
+          baselines = issue.cosmosys_presentation_baselines.where(attribute_name: attributes).to_a
+          next if baselines.map(&:attribute_name).sort == attributes.sort &&
+                  baselines.all? { |baseline| baseline.captured_maturity == issue.status.cosmosys_maturity_level }
+
+          Cosmosys::ApprovedPresentationBaseline.capture!(issue, user: User.current)
+          @baseline_items << issue
+        end
+        @stats['presentation_baselines'] = @baseline_items.length
       end
 
       # --- verification ------------------------------------------------------
@@ -774,10 +937,16 @@ module SnapshotsGen
         end
         relation_ids = details.where(property: 'relation').pluck(:old_value, :value).flatten.compact.map(&:to_i).uniq
         problems << 'relation details name missing items' unless (relation_ids - Issue.where(id: relation_ids).pluck(:id)).empty?
-        leftovers = journals.where('notes LIKE ?', '%#snapshots-gen-item-%').count +
-                    Issue.where(id: @item_map.values).where('description LIKE ?', '%#snapshots-gen-item-%').count +
-                    WikiContent.where(page_id: @page_map.values).where('text LIKE ?', '%#snapshots-gen-item-%').count
-        problems << "#{leftovers} texts still hold reference placeholders" if leftovers.positive?
+        leftovers = leftover_placeholders(journals, details)
+        problems << "#{leftovers.sum { |_where, count| count }} texts still hold link placeholders: " \
+                    "#{leftovers.map { |where, count| "#{where} #{count}" }.join(', ')}" if leftovers.any?
+        unready = Array(@baseline_items).reject do |issue|
+          Cosmosys::ApprovedPresentationBaseline.inspect(issue.reload, user: User.current).status == :consistent
+        end
+        if unready.any?
+          say "WARNING: #{unready.length} consolidated items read \"missing evidence\" or \"inconsistent\" after capturing " \
+              "their presentation baselines: #{unready.first(20).map(&:csid).join(', ')}"
+        end
         labels, product_gaps = untranslated_history_labels(journals)
         problems << "history labels without translation: #{labels.join(', ')}" if labels.any?
         product_gaps.each do |key|
@@ -787,6 +956,43 @@ module SnapshotsGen
         @stats['unlabelled_native_fields'] = product_gaps.length
         say "Verified #{journals.count} journals and #{details.count} details; #{@dropped.length} records dropped (listed in the report)."
         problems
+      end
+
+      # Texts that still hold a placeholder, by table and column. A tag list
+      # is literal (a tag may be named like a placeholder).
+      def leftover_placeholders(journals, details)
+        details = details.where.not(property: 'attr', prop_key: 'tag_list')
+        checks = {
+          'journals.notes' => [journals, 'notes'],
+          'journal_details.old_value' => [details, 'old_value'], 'journal_details.value' => [details, 'value'],
+          'wiki_contents.text' => [WikiContent.where(page_id: @page_map.values), 'text'],
+          'custom_values.value' => [CustomValue.where(customized_type: 'Issue', customized_id: @item_map.values), 'value'],
+          'documents.description' => [Document.where(project_id: @project_map.values), 'description'],
+          'projects.description' => [Project.where(id: @project_map.values), 'description']
+        }
+        (%w[description] + (Issue.column_names & TEXT_COLUMNS)).each do |column|
+          checks["issues.#{column}"] = [Issue.where(id: @item_map.values), column]
+        end
+        found = checks.filter_map do |where, (scope, column)|
+          count = scope.where(placeholder_condition(scope.model.arel_table[column])).count
+          [where, count] if count.positive?
+        end
+        # The data of a wiki version is binary (bytea): read it as Redmine does.
+        version_texts = WikiContentVersion.where(page_id: @page_map.values).to_a.map { |version| version.text.to_s }
+        versions = version_texts.count { |text| text.match?(TextLinks::LEFTOVER) }
+        found << ['wiki_content_versions.data', versions] if versions.positive?
+        # Texts of the source that already held something like a placeholder
+        # were escaped by the converter and restored here: as many as were
+        # restored may remain, and no more.
+        restored = @resolver ? @resolver.restored : 0
+        return found unless restored.positive? && found.any?
+
+        remaining = version_texts.sum { |text| text.scan(TextLinks::LEFTOVER).length } +
+                    checks.sum do |_where, (scope, column)|
+                      scope.where(placeholder_condition(scope.model.arel_table[column])).pluck(column)
+                           .sum { |text| text.to_s.scan(TextLinks::LEFTOVER).length }
+                    end
+        remaining <= restored ? [] : found
       end
 
       # Renders every imported detail as Redmine does and looks for labels

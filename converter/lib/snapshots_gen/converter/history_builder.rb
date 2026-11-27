@@ -18,17 +18,34 @@ module SnapshotsGen
         'assigned_to_id' => 'users', 'author_id' => 'users', 'category_id' => 'categories',
         'fixed_version_id' => 'versions', 'project_id' => 'projects', 'parent_id' => 'items'
       }.freeze
-      ATTR_LITERALS = %w[subject description start_date due_date done_ratio estimated_hours is_private].freeze
+      # tag_list holds the old tag list as the plugin printed it (names joined
+      # by commas, quoted when a name has one). It is kept as an exact literal:
+      # never parsed, split or rewritten, so nil, commas and quotes survive.
+      ATTR_LITERALS = %w[subject description start_date due_date done_ratio estimated_hours is_private tag_list].freeze
+
+      # Tag changes (attr/tag_list details) of journals that the history
+      # skips because their item is absorbed into a document or is not in the
+      # source: { 'journal_id', 'issue_id', 'detail_ids', 'reason' }. The tags
+      # package reports them as blocking (history_tag_change_dropped).
+      attr_reader :dropped_tag_changes
 
       def initialize(plan, csys_packages:)
         @plan = plan
         @source = plan.source
         @report = plan.report
         @csys_packages = csys_packages
+        @dropped_tag_changes = []
       end
 
       def write(directory)
         writer = LegacySnapshot::Writer.new(directory, schema: LegacySnapshot::HISTORY_SCHEMA)
+        # The files of the Files module travel in this package: the .csys has
+        # no place for them.
+        writer.write_asset_index(@plan.project_files.keys.sort.map do |id|
+          index = @source.asset_index.fetch(id)
+          digest, bytes = writer.add_asset(@source.asset_path(index.fetch('sha256')))
+          { 'attachment_id' => id, 'sha256' => digest, 'bytes' => bytes, 'status' => 'present' }
+        end)
         entities.each do |name, rows|
           columns = rows.flat_map(&:keys).uniq.sort
           columns = ['id'] if columns.empty?
@@ -202,7 +219,7 @@ module SnapshotsGen
             'searchable' => field['searchable'], 'default_value' => field['default_value'],
             'description' => field['description'], 'visible' => field['visible'], 'editable' => field['editable'],
             'regexp' => field['regexp'], 'min_length' => field['min_length'], 'max_length' => field['max_length'],
-            'format_store' => field['format_store'], 'position' => field['position'],
+            'format_store' => Rules.yaml_hash(field['format_store']).sort.to_h, 'position' => field['position'],
             'computed' => field.key?('is_computed') ? field['is_computed'] : nil, 'formula' => field['formula'],
             'trackers' => Array(links[id]).filter_map { |link| @plan.mapped_tracker_name(@plan.tracker_name(link['tracker_id'])) }.uniq.sort,
             'roles' => Array(role_links[id]).filter_map { |link| role_names[link['role_id']] }.sort,
@@ -235,21 +252,12 @@ module SnapshotsGen
         end
       end
 
-      # The .csys import creates each container's attachments in this order,
-      # so (container, ordinal) finds them again in the new instance.
-      def attachments
-        containers = {}
-        @plan.items.each_value do |item|
-          next if item.synthetic?
+      def attachment_containers
+        @plan.attachment_containers
+      end
 
-          @plan.attachments_of('Issue', item.source_id).each_with_index { |id, index| containers[id] = ['item', item.key, index] }
-        end
-        @plan.documents.each_value do |document|
-          document.attachment_ids.each_with_index { |id, index| containers[id] ||= ['document', document.key, index] }
-        end
-        table('wiki_pages').each do |page|
-          @plan.attachments_of('WikiPage', page['id']).each_with_index { |id, index| containers[id] = ['wiki_page', page['id'], index] }
-        end
+      def attachments
+        containers = attachment_containers
         table('attachments').map do |row|
           container = containers[row['id']]
           index = @source.asset_index[row['id']] || {}
@@ -257,7 +265,8 @@ module SnapshotsGen
             'id' => row['id'], 'container' => container&.first, 'container_key' => container && container[1],
             'ordinal' => container && container[2], 'filename' => row['filename'], 'sha256' => index['sha256'],
             'author_id' => row['author_id'], 'created_on' => row['created_on'], 'description' => row['description'],
-            'downloads' => row['downloads'], 'migrated' => !container.nil?
+            'downloads' => row['downloads'], 'migrated' => !container.nil?, 'content_type' => row['content_type'],
+            'bytes' => index['bytes']
           }
         end
       end
@@ -272,11 +281,13 @@ module SnapshotsGen
 
           if @plan.absorbed.key?(journal['journalized_id'])
             document_journals += 1
+            drop_tag_changes(journal, details_by_journal, 'absorbed_into_document')
             next
           end
           item = @plan.item_for_issue(journal['journalized_id'])
           unless item
             @report.add('history_journal_dropped', "journal ##{journal['id']}", reason: 'its item is not in the source')
+            drop_tag_changes(journal, details_by_journal, 'not_in_source')
             next
           end
           details = Array(details_by_journal[journal['id']]).sort_by { |row| row['id'] }.filter_map do |detail|
@@ -285,19 +296,28 @@ module SnapshotsGen
           notes = Rules.clean(journal['notes']).to_s
           if notes.strip.empty? && details.empty?
             notes_dropped += 1
-            @report.add('history_journal_dropped', "journal ##{journal['id']}", item: item.key,
+            @report.add('history_journal_dropped', "journal ##{journal['id']}", item: item.key, csid: item.csid,
                                                                               reason: 'no translatable change left')
             next
           end
           @details.concat(details)
+          @plan.check_text(notes, "journal ##{journal['id']}", item)
           {
             'id' => journal['id'], 'item_key' => item.key, 'user_id' => journal['user_id'],
-            'notes' => references(notes, "journal ##{journal['id']}"), 'private_notes' => journal['private_notes'],
+            'notes' => references(notes, "journal ##{journal['id']}", item), 'private_notes' => journal['private_notes'],
             'created_on' => journal['created_on']
           }
         end
         @report.add('history_journal_document', nil, journals: document_journals) if document_journals.positive?
         rows
+      end
+
+      def drop_tag_changes(journal, details_by_journal, reason)
+        ids = Array(details_by_journal[journal['id']]).select { |row| row['property'] == 'attr' && row['prop_key'] == 'tag_list' }
+                                                      .map { |row| row['id'] }.sort_by { |id| LegacySnapshot::Values.sort_key(id) }
+        return if ids.empty?
+
+        @dropped_tag_changes << { 'journal_id' => journal['id'], 'issue_id' => journal['journalized_id'], 'detail_ids' => ids, 'reason' => reason }
       end
 
       def translate_detail(item, journal, detail)
@@ -308,10 +328,10 @@ module SnapshotsGen
         case property
         when 'attr'
           if ATTR_REFS.key?(key)
-            base.merge('value_ref' => ATTR_REFS.fetch(key))
+            translate_reference(item, journal, detail, base.merge('value_ref' => ATTR_REFS.fetch(key)))
           elsif key == 'description'
-            base.merge('old_value' => references(detail['old_value'], "detail ##{detail['id']}"),
-                       'value' => references(detail['value'], "detail ##{detail['id']}"))
+            base.merge('old_value' => references(detail['old_value'], "detail ##{detail['id']}", item),
+                       'value' => references(detail['value'], "detail ##{detail['id']}", item))
           elsif ATTR_LITERALS.include?(key)
             base
           else
@@ -320,7 +340,7 @@ module SnapshotsGen
         when 'cf'
           translate_custom_field_detail(item, detail, base)
         when 'attachment'
-          base.merge('prop_ref' => 'attachments')
+          translate_attachment(item, journal, detail, base)
         when 'relation'
           other = (detail['value'] || detail['old_value']).to_i
           if @plan.absorbed.key?(other)
@@ -346,15 +366,19 @@ module SnapshotsGen
         if (native = Rules::NATIVE_ISSUE_FIELDS[name])
           return drop(detail, item, "#{name} on an item that is not a requirement") if native['requirement'] && item.profile != 'requirement'
 
+          text = Rules::TEXT_NATIVE_FIELDS.include?(native['field']) && @plan.formatted_field?(name)
           mapped = lambda do |value|
             next nil if value.nil?
+            next references(value, "detail ##{detail['id']}", item) if text
 
             native['map'] ? (native['map'][value.to_s] || value) : value
           end
           return base.merge('property' => 'attr', 'prop_key' => native['field'],
                             'old_value' => mapped.call(detail['old_value']), 'value' => mapped.call(detail['value']))
         end
-        if Rules::DROPPED_ISSUE_FIELDS.key?(name) || Rules::DATUM_FIELDS.include?(name)
+        # rqVar and rqValue live on in the datum when they became one, and as
+        # custom fields of the item when they could not.
+        if Rules::DROPPED_ISSUE_FIELDS.key?(name) || (Rules::DATUM_FIELDS.include?(name) && @plan.datum_source?(item))
           return drop(detail, item, "#{name}: #{Rules::DROPPED_ISSUE_FIELDS[name] || 'turned into project data'}")
         end
         if Rules::DOCUMENT_REFERENCE_FIELDS.key?(name) && !@plan.kept_fields.key?(field['id'])
@@ -362,28 +386,91 @@ module SnapshotsGen
         end
         @plan.kept_fields[field['id']] ||= field
         reference = { 'user' => 'users', 'version' => 'versions' }[field['field_format']]
-        base.merge('prop_ref' => 'custom_fields', 'prop_key' => field['id'].to_s, 'value_ref' => reference)
+        row = base.merge('prop_ref' => 'custom_fields', 'prop_key' => field['id'].to_s, 'value_ref' => reference)
+        # Text values follow the current value (Plan#rewrite_field_value):
+        # only a formatted field's links are rewritten. cosmoSys never
+        # touches the history, so nothing needs protecting.
+        return row unless @plan.formatted_field?(name)
+
+        row.merge(%w[old_value value].to_h do |side|
+          [side, @plan.rewrite_text(detail[side], "detail ##{detail['id']}", item: item)]
+        end)
+      end
+
+      # An attachment change keeps its attachment only when that attachment
+      # reaches the new instance with this same item. Otherwise (deleted from
+      # the old instance, its file missing, or migrated with another
+      # container) its old id would name another file, or none, in the new
+      # instance. Redmine 4.2 and 7 show a change whose attachment the item no
+      # longer has as the bare file name, without a link, so the change keeps
+      # its file names and takes id 0, which no attachment has: it shows the
+      # same as in the old instance. Every case is reported, and the importer
+      # writes exactly this.
+      def translate_attachment(item, journal, detail, base)
+        id = Integer(detail['prop_key'].to_s, exception: false)
+        container = id && attachment_containers[id]
+        return base.merge('prop_ref' => 'attachments') if container && container[0] == 'item' && container[1] == item.key
+
+        @attachment_ids ||= table('attachments').map { |row| row['id'] }.to_set
+        reason = id && @attachment_ids.include?(id) ? 'not migrated with this item' : 'deleted from the source'
+        missing = { 'old_value' => 'old', 'value' => 'new' }.reject { |column, _side| detail[column].to_s.empty? }.values
+        @report.add('history_attachment_cleared', "detail ##{detail['id']}",
+                    item: item.key, csid: item.csid, journal: journal['id'], attachment: detail['prop_key'].to_s,
+                    missing: missing, reason: reason, old_value: detail['old_value'], value: detail['value'])
+        base.merge('prop_key' => '0')
       end
 
       def drop(detail, item, reason)
-        @report.add('history_detail_dropped', "detail ##{detail['id']}", item: item.key, reason: reason)
+        @report.add('history_detail_dropped', "detail ##{detail['id']}", item: item.key, csid: item.csid,
+                                                                          journal: detail['journal_id'], reason: reason)
         nil
       end
 
-      # Every "#id" of a migrated item becomes a placeholder the importer
-      # replaces with the new id; unknown items are escaped.
-      def references(text, subject)
-        return text if text.nil?
+      # Entities whose source ids the converter can check; users are mapped by
+      # the importer (a deleted user becomes the anonymous user, as in Redmine).
+      SOURCE_TABLES = {
+        'statuses' => 'issue_statuses', 'trackers' => 'trackers', 'priorities' => 'enumerations',
+        'categories' => 'issue_categories', 'versions' => 'versions', 'projects' => 'projects'
+      }.freeze
 
-        text.to_s.gsub(/(?<![A-Za-z0-9_!&-])#(\d+)(?![A-Za-z0-9_-])/) do
-          id = Regexp.last_match(1).to_i
-          if @plan.item_for_issue(id)
-            "##{Plan::PLACEHOLDER}#{id}"
-          else
-            @report.add('reference_neutralized', subject, reference: id)
-            "!##{id}"
-          end
+      # A change whose old or new value names a record deleted from the old
+      # instance. Redmine 4.2 shows a deleted status, version, category... as
+      # nothing and a deleted parent as its bare number, which in the new
+      # instance would name another item. That side is left empty, so the
+      # change never points to a wrong record and the journal keeps it; when
+      # no side is left, the change says nothing and is dropped. Both cases
+      # are reported, so the importer never has to drop a reference itself.
+      def translate_reference(item, journal, detail, row)
+        missing = { 'old_value' => 'old', 'value' => 'new' }.reject do |column, _side|
+          row[column].to_s.empty? || source_record?(row['value_ref'], row[column])
         end
+        return row if missing.empty?
+
+        cleared = row.merge(missing.keys.to_h { |column| [column, nil] })
+        empty = cleared['old_value'].to_s.empty? && cleared['value'].to_s.empty?
+        @report.add(empty ? 'history_reference_dropped' : 'history_reference_cleared', "detail ##{detail['id']}",
+                    item: item.key, csid: item.csid, journal: journal['id'], field: detail['prop_key'],
+                    missing: missing.values, old_value: detail['old_value'], value: detail['value'])
+        empty ? nil : cleared
+      end
+
+      def source_record?(entity, value)
+        id = Integer(value.to_s, exception: false)
+        return true if id.nil? # not an id: left to the importer, which reports it
+        return !@plan.item_for_issue(id).nil? if entity == 'items'
+        return true unless SOURCE_TABLES.key?(entity)
+
+        @source_ids ||= {}
+        @source_ids[entity] ||= table(SOURCE_TABLES.fetch(entity)).filter_map do |row|
+          row['id'] unless entity == 'priorities' && row['type'] != 'IssuePriority'
+        end.to_set
+        @source_ids[entity].include?(id)
+      end
+
+      # Links in a text of the history, rewritten as in the .csys
+      # (Plan#rewrite_text): placeholders the importer resolves.
+      def references(text, subject, item = nil)
+        @plan.rewrite_text(text, subject, item: item)
       end
 
       def wiki_pages
@@ -398,7 +485,8 @@ module SnapshotsGen
             'protected' => row['protected'], 'current_version' => content['version'],
             'current_author_id' => content['author_id'], 'current_comments' => content['comments'],
             'current_updated_on' => content['updated_on'],
-            'current_text' => references(Rules.clean(content['text']), "wiki page ##{row['id']}")
+            'current_text' => references(Rules.clean(content['text']).tap { |text| @plan.check_text(text, "wiki page ##{row['id']}", nil) },
+                                         "wiki page ##{row['id']}")
           }
         end
       end
@@ -414,7 +502,8 @@ module SnapshotsGen
           {
             'id' => row['id'], 'page_id' => row['page_id'], 'version' => row['version'], 'author_id' => row['author_id'],
             'comments' => Rules.clean(row['comments']), 'updated_on' => row['updated_on'],
-            'text' => references(Rules.clean(decompress(row)), "wiki version ##{row['id']}")
+            'text' => references(Rules.clean(decompress(row)).tap { |text| @plan.check_text(text, "wiki version ##{row['id']}", nil) },
+                                 "wiki version ##{row['id']}")
           }
         end
       end

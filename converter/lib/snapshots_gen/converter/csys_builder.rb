@@ -143,7 +143,7 @@ module SnapshotsGen
         {
           'identifier' => row['identifier'],
           'name' => Rules.clean(row['name']),
-          'description' => Rules.clean(row['description']).to_s,
+          'description' => @plan.project_description(row['id']),
           'cscode' => @plan.project_code(row['id']),
           'profile' => profile,
           'language' => nil,

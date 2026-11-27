@@ -2,6 +2,8 @@
 
 require 'set'
 require_relative 'rules'
+require_relative '../text_links'
+require_relative 'text_checks'
 
 module SnapshotsGen
   module Converter
@@ -20,12 +22,12 @@ module SnapshotsGen
       CatalogEntry = Struct.new(:document_key, :project_id, :family, :position, :source_item_id, :references, keyword_init: true)
 
       attr_reader :source, :report, :projects, :items, :items_by_source_id, :documents, :catalog,
-                  :relations, :cross_relations, :absorbed, :kept_fields, :deferred_values, :roots,
-                  :description_references
+                  :relations, :cross_relations, :absorbed, :kept_fields, :deferred_values, :roots
 
       def initialize(source, report)
         @source = source
         @report = report
+        @text_counts = Hash.new(0)
       end
 
       def build!
@@ -37,6 +39,8 @@ module SnapshotsGen
         plan_hierarchy!
         plan_data!
         plan_identities!
+        report_data_sections!
+        report_generated_items!
         plan_positions!
         plan_catalog_and_relations!
         plan_fields!
@@ -374,19 +378,40 @@ module SnapshotsGen
       end
 
       # rqVar and rqValue of requirements become datum items, under one data
-      # section per project, as cosmosys_req's own schema migration does.
+      # section per project, as cosmosys_req's own schema migration does. A
+      # variable key cosmoSys would refuse (invalid, or repeated in the tree)
+      # cannot be a datum: that requirement keeps rqVar and rqValue as custom
+      # fields (plan_fields!), like any field without a current equivalent,
+      # and so does an rqValue without rqVar. A project left without data gets
+      # no data section.
       def plan_data!
         @datum_keys = {}
         @datum_numbers = Hash.new(0)
+        @datum_sources = Set.new
         by_project = Hash.new { |hash, key| hash[key] = [] }
         @items.each_value do |item|
           next if item.synthetic? || item.profile != 'requirement'
 
           fields = values('Issue', item.source_id)
           name = Rules.clean(fields['rqVar']).to_s.strip
-          next if name.empty?
+          value = Rules.clean(fields['rqValue']).to_s
+          if name.empty?
+            unless value.strip.empty?
+              report.add('datum_field_kept', item.key, variable: nil, value: value, reason: 'rqValue without rqVar')
+            end
+            next
+          end
 
-          by_project[item.project_id] << [item, name, Rules.clean(fields['rqValue']).to_s]
+          tree_key = [root_of(item.project_id), name.downcase]
+          reason = if !name.match?(/\A[A-Za-z][A-Za-z0-9_]*\z/) then 'invalid variable key'
+                   elsif @datum_keys.key?(tree_key) then 'variable key repeated in the project tree'
+                   end
+          if reason
+            report.add('datum_field_kept', item.key, variable: name, value: value, reason: reason)
+            next
+          end
+          @datum_keys[tree_key] = true
+          by_project[item.project_id] << [item, name, value]
         end
         by_project.each do |project_id, entries|
           section = Item.new(
@@ -397,13 +422,6 @@ module SnapshotsGen
           )
           @items[section.key] = section
           entries.each do |requirement, name, value|
-            tree_key = [root_of(project_id), name.downcase]
-            if !name.match?(/\A[A-Za-z][A-Za-z0-9_]*\z/) || @datum_keys.key?(tree_key)
-              report.add('field_value_unmapped', requirement.key, field: 'rqVar', value: name,
-                                                                  reason: 'invalid or repeated variable key; kept only in the history')
-              next
-            end
-            @datum_keys[tree_key] = true
             # cosmoSys numbers user-defined identities downwards from -1 per tree.
             @datum_numbers[root_of(project_id)] -= 1
             datum = Item.new(
@@ -415,19 +433,49 @@ module SnapshotsGen
               profile_fields: { 'csys_value' => value }
             )
             @items[datum.key] = datum
+            @datum_sources << requirement.key
             report.add('datum_created', datum.key, variable: name, value: value, requirement: requirement.key)
           end
+        end
+      end
+
+      # The "Project data" chapters exist only in the new instance; once
+      # their CSID is known, the report names them.
+      def report_data_sections!
+        @items.each_value.select { |item| item.synthetic == 'data_section' }.each do |section|
+          report.add('data_section_created', section.key, project: project_identifier(section.project_id), csid: section.csid,
+                                                          data: @items.each_value.count { |item| item.parent_key == section.key })
+        end
+      end
+
+      # Every item that exists only in the new instance, with its final CSID,
+      # so a checker can tell it from a migrated item without reading this
+      # code: "Group: ..." chapters (from = the item they wrap), "Project
+      # data" chapters and their data (from = the requirement). Source items
+      # keep their identity_* entries.
+      def report_generated_items!
+        @items.each_value.select(&:synthetic?).sort_by(&:key).each do |item|
+          from = case item.synthetic
+                 when 'group', 'datum' then item.key.sub(/\Aitem:(group|datum)-/, 'item:')
+                 end
+          report.add('item_generated', item.key, kind: item.synthetic, project: project_identifier(item.project_id),
+                                                 csid: item.csid, from: from)
         end
       end
 
       # Identities: an old CSID is kept whenever it is unique within its
       # project tree, even when its prefix belongs to another project (the item
       # was moved): cosmoSys only requires uniqueness per tree, and people cite
-      # these identifiers. A prefix that was the project's own code with
-      # characters cosmoSys does not accept is rewritten with the normalized
-      # code. Items without a usable CSID take the next number of their project.
+      # these identifiers. A prefix cosmoSys does not accept (only letters and
+      # digits) is rewritten: with the normalized code when it was the
+      # project's own code, and with the same rule (its other characters
+      # removed) when it is the prefix of another project, so ABC-X-0007 becomes
+      # ABCX-0007 wherever the item lives. A rewritten CSID that collides with
+      # another one of its tree is blocking. Items without a usable CSID take
+      # the next number of their project.
       def plan_identities!
         used = Hash.new { |hash, key| hash[key] = Set.new }
+        owners = Hash.new { |hash, key| hash[key] = {} }
         candidates = {}
         @items.values.reject { |item| item.profile == 'datum' || item.synthetic? }.sort_by(&:source_id).each do |item|
           identifier = @cosmosys_issues.dig(item.source_id, 'identifier').to_s
@@ -436,11 +484,22 @@ module SnapshotsGen
 
           raw_code = values('Project', item.project_id)[Rules::PROJECT_CODE_FIELD].to_s
           prefix = match[1]
-          prefix = project_code(item.project_id) if !raw_code.empty? && prefix.casecmp?(raw_code)
+          if !raw_code.empty? && prefix.casecmp?(raw_code)
+            prefix = project_code(item.project_id)
+          elsif !prefix.match?(Rules::CODE_PATTERN)
+            prefix = Rules.normalize_code(prefix)
+          end
           csid = "#{prefix}-#{match[2]}"
           tree = root_of(item.project_id)
+          normalized = csid != identifier
+          other = owners[tree][csid.downcase]
+          if other && (normalized || other['normalized'])
+            report.add('identity_normalized_collision', item.key, from: identifier, to: csid, other: other['item'],
+                                                                  other_from: other['original'])
+          end
           next unless used[tree].add?(csid.downcase)
 
+          owners[tree][csid.downcase] = { 'item' => item.key, 'original' => identifier, 'normalized' => normalized }
           candidates[item.key] = { 'original' => identifier, 'csid' => csid, 'number' => match[2].to_i,
                                    'own' => prefix.casecmp?(project_code(item.project_id)) }
         end
@@ -471,6 +530,36 @@ module SnapshotsGen
 
             original = @cosmosys_issues.dig(item.source_id, 'identifier')
             report.add('identity_renumbered', item.key, from: original, to: item.csid)
+          end
+        end
+        check_future_numbers!
+      end
+
+      # cosmoSys gives a new item of a project the next number after the
+      # highest one among the project's items with its own code
+      # (ProjectMaterializationIdentity#local_maximum, then cslast_id + 1),
+      # and a CSID must be unique in the whole tree. An item of another
+      # project of the tree with that code and a higher number (a moved item,
+      # or one whose prefix lost its dashes) would make the creation of new
+      # items fail there once the numbering reaches it.
+      def check_future_numbers!
+        items = @items.values.reject { |item| item.profile == 'datum' || item.csid.to_s.empty? }
+        by_tree = items.group_by { |item| root_of(item.project_id) }
+        # Every project of the tree, also one without items: its first item
+        # takes number 1.
+        @projects.keys.group_by { |project_id| root_of(project_id) }.each do |root, project_ids|
+          tree_items = by_tree.fetch(root, [])
+          project_ids.sort.each do |project_id|
+            code = project_code(project_id)
+            own = ->(item) { item.csid.to_s.match(/\A(.+)-(\d+)\z/)&.then { |m| m[1].casecmp?(code) ? m[2].to_i : nil } }
+            last = tree_items.select { |item| item.project_id == project_id }.filter_map(&own).max.to_i
+            tree_items.each do |item|
+              number = own.call(item)
+              next unless item.project_id != project_id && number && number > last
+
+              report.add('identity_future_collision', item.key, csid: item.csid, project: project_identifier(project_id),
+                                                               next_number: last + 1)
+            end
           end
         end
       end
@@ -564,6 +653,12 @@ module SnapshotsGen
 
       public
 
+      # Whether the rqVar and rqValue of this item became a datum. When not,
+      # the item keeps them, with their history, as custom fields.
+      def datum_source?(item)
+        @datum_sources.include?(item.key)
+      end
+
       def poris_item?(item)
         item && !item.synthetic? && Rules::PORIS_TRACKERS.include?(tracker_name(item.issue['tracker_id']))
       end
@@ -640,7 +735,7 @@ module SnapshotsGen
               end
               profile_fields[native['field']] = native_value(item, name, native, value)
               native_counts[name] += 1
-            elsif Rules::DROPPED_ISSUE_FIELDS.key?(name) || Rules::DATUM_FIELDS.include?(name)
+            elsif Rules::DROPPED_ISSUE_FIELDS.key?(name) || (Rules::DATUM_FIELDS.include?(name) && datum_source?(item))
               dropped_counts[name] += 1
             elsif Rules::DOCUMENT_REFERENCE_FIELDS.key?(name)
               rest = Rules.unparsed_reference_text(value)
@@ -713,53 +808,269 @@ module SnapshotsGen
 
       private
 
-      # "#123" item references in descriptions: inside the same package the
-      # cosmoSys import rewrites them; across packages the history importer
-      # does; references to items that are not migrated are escaped.
+      # Links in every text the .csys carries: descriptions (also of the
+      # generated items, which name their source item), the native text
+      # fields, the kept custom fields, documents and projects. The history
+      # builder does the same with the history (notes, wiki versions and the
+      # values of description and field changes) through rewrite_text, so the
+      # last value of a change is still the current text.
       def plan_references!
-        @description_references = []
+        source_host
         @items.each_value do |item|
           next if item.synthetic?
 
-          root = root_of(item.project_id)
-          item.description = rewrite_references(item.description, root, item.key) do |id|
-            @description_references << { 'item' => item.key, 'source_id' => id }
+          check_text(item.description, item.key, item)
+          check_text(item.subject, "#{item.key} subject", item, dialect: false)
+          (item.profile_fields || {}).each do |field, value|
+            check_text(value, "#{item.key} #{field}", item) if native_text_formatted?(item, field) && value.is_a?(String)
           end
+          Array(item.custom_fields).each do |entry|
+            check_text(entry['value'], "#{item.key} #{entry['name']}", item) if formatted_field?(entry['name']) && entry['value'].is_a?(String)
+          end
+        end
+        @documents.each_value { |document| check_text(document.description, document.key, nil) }
+        @projects.each_value { |row| check_text(Rules.clean(row['description']).to_s, "project:#{row['id']}", nil) }
+        @items.each_value do |item|
+          root = root_of(item.project_id)
+          item.description = rewrite_text(item.description, item.key, item: item, protect_root: root)
+          item.profile_fields = (item.profile_fields || {}).to_h do |field, value|
+            next [field, value] unless native_text_formatted?(item, field) && value.is_a?(String)
+
+            [field, rewrite_text(value, "#{item.key} #{field}", item: item)]
+          end
+          report_unformatted_natives(item)
+          item.custom_fields = Array(item.custom_fields).map do |entry|
+            entry.merge('value' => rewrite_field_value(entry['name'], entry['value'], "#{item.key} #{entry['name']}", item, root))
+          end
+        end
+        @documents.each_value do |document|
+          document.description = rewrite_text(document.description, document.key)
+        end
+        @project_descriptions = @projects.transform_values do |row|
+          rewrite_text(Rules.clean(row['description']).to_s, "project:#{row['id']}")
         end
         other = Hash.new(0)
         @items.each_value do |item|
-          item.description.scan(/(?<![A-Za-z0-9_])(document#\d+|version#\d+|r\d+\b|commit:|attachment#\d+)/) { other[Regexp.last_match(1)[/\A[a-z]+/]] += 1 }
+          item.description.scan(/(?<![A-Za-z0-9_])(r\d+\b|commit:)/) { other[Regexp.last_match(1)[/\A[a-z]+/]] += 1 }
           Rules.ambiguous_markdown_tables(item.description).each do |line|
             report.add('ambiguous_markdown_table', item.key, line: line)
           end
         end
-        other.each { |kind, count| report.add('other_references', kind, count: count) }
+        other.each { |kind, count| @text_counts["other:#{kind}"] += count }
       end
 
       public
 
-      PLACEHOLDER = 'snapshots-gen-item-'
+      # Where each migrated attachment goes: { id => [container, key, ordinal] }.
+      # The .csys import creates each container's attachments in this order,
+      # so (container, ordinal) finds them again in the new instance.
+      def attachment_containers
+        return @attachment_containers if @attachment_containers
 
-      # Returns the text with references to other packages turned into
-      # placeholders and references to unknown items escaped with "!".
-      def rewrite_references(text, root, subject)
-        text.to_s.gsub(/(?<![A-Za-z0-9_!&-])#(\d+)(?![A-Za-z0-9_-])/) do
-          id = Regexp.last_match(1).to_i
+        containers = {}
+        items.each_value do |item|
+          next if item.synthetic?
+
+          attachments_of('Issue', item.source_id).each_with_index { |id, index| containers[id] = ['item', item.key, index] }
+        end
+        documents.each_value do |document|
+          document.attachment_ids.each_with_index { |id, index| containers[id] ||= ['document', document.key, index] }
+        end
+        source.table('wiki_pages').each do |page|
+          attachments_of('WikiPage', page['id']).each_with_index { |id, index| containers[id] = ['wiki_page', page['id'], index] }
+        end
+        project_files.each { |id, (type, key, index)| containers[id] = [type, key, index] }
+        @attachment_containers = containers
+      end
+
+      # Files of the Files module: attachments of a project, or of one of its
+      # versions. The .csys has no place for them; the history importer
+      # creates them. { id => ['project' | 'version', source id, ordinal] }
+      def project_files
+        @project_files ||= begin
+          files = {}
+          @projects.each_key do |project_id|
+            attachments_of('Project', project_id).each_with_index { |id, index| files[id] = ['project', project_id, index] }
+          end
+          @versions.each_key do |version_id|
+            next unless @projects.key?(@versions[version_id]['project_id'])
+
+            attachments_of('Version', version_id).each_with_index { |id, index| files[id] = ['version', version_id, index] }
+          end
+          files
+        end
+      end
+
+      def project_description(project_id)
+        @project_descriptions.fetch(project_id)
+      end
+
+      # The old instance's host and protocol, from its settings (Redmine's
+      # defaults when they were never saved). Links to it are links into the
+      # old instance.
+      def source_host
+        @source_host ||= begin
+          settings = source.table('settings').to_h { |row| [row['name'], row['value'].to_s.sub(/\A--- /, '').strip] }
+          host = settings['host_name'].to_s.empty? ? 'localhost:3000' : settings['host_name']
+          protocol = settings['protocol'].to_s.empty? ? 'http' : settings['protocol']
+          report.add('source_host', host, protocol: protocol, stored: !settings['host_name'].to_s.empty?)
+          TextLinks::Host.new(host, protocol)
+        end
+      end
+
+      # The angle rule is for Redcarpet ("markdown"); code is recognized in
+      # both Markdown dialects.
+      def markdown_source?
+        %w[markdown common_mark].include?(text_formatting)
+      end
+
+      def redcarpet_source?
+        text_formatting == 'markdown'
+      end
+
+      # A text of the old instance with its links rewritten
+      # (SnapshotsGen::TextLinks) and every change reported under subject.
+      # protect_root: the root project of the .csys the text goes into, whose
+      # item ids cosmoSys's own rewriter would take.
+      def rewrite_text(text, subject, item: nil, markdown: markdown_source?, protect_root: nil)
+        return text if text.nil?
+
+        protect = protect_root && lambda do |id|
           target = @items_by_source_id[id]
-          if target && root_of(target.project_id) == root
-            "##{id}"
-          elsif target
-            report.add('reference_cross_package', subject, reference: id)
-            yield id if block_given?
-            "##{PLACEHOLDER}#{id}"
+          target && root_of(target.project_id) == protect_root
+        end
+        rewriter = TextLinks::Rewriter.new(
+          # Redmine 4.2 linked user#id only for a user of type User.
+          item: ->(id) { @items_by_source_id.key?(id) }, user: ->(id) { @users.dig(id, 'type') == 'User' },
+          attachment: ->(id) { attachment_containers.key?(id) }, host: source_host, markdown: markdown,
+          angle: markdown && redcarpet_source?, protect: protect
+        )
+        result, events = rewriter.rewrite(text)
+        record_text_events(subject, item, events)
+        result
+      end
+
+      # Kept custom fields. Redmine renders the links of a string or text
+      # field only when the field has full formatting (Redmine::FieldFormat
+      # StringFormat and TextFormat); any other value is shown literally and
+      # stays byte for byte, protected only from cosmoSys's rewriter, which
+      # takes every string, text and link value.
+      def rewrite_field_value(name, value, subject, item, root)
+        return value.map { |entry| rewrite_field_value(name, entry, subject, item, root) } if value.is_a?(Array)
+        return value unless value.is_a?(String)
+        return rewrite_text(value, subject, item: item, protect_root: root) if formatted_field?(name)
+
+        protect = ->(id) { (target = @items_by_source_id[id]) && root_of(target.project_id) == root }
+        result, count = TextLinks.protect_literals(value, protect)
+        @text_counts['literal'] += count
+        result
+      end
+
+      # Whether Redmine 4.2 rendered the value of this issue custom field as
+      # formatted text (so its links were links): a string or text field
+      # with text_formatting "full".
+      def formatted_field?(name)
+        field = issue_field(name)
+        return false unless field && %w[string text].include?(field['field_format'])
+
+        Rules.yaml_hash(field['format_store'])['text_formatting'] == 'full'
+      end
+
+      # A native text field takes the formatting of the source field it
+      # comes from.
+      def native_text_formatted?(item, native_field)
+        return false unless Rules::TEXT_NATIVE_FIELDS.include?(native_field)
+
+        source = native_source_field(item, native_field)
+        source ? formatted_field?(source) : false
+      end
+
+      def native_source_field(item, native_field)
+        names = Rules::NATIVE_ISSUE_FIELDS.select { |_name, native| native['field'] == native_field }.keys
+        values = item.synthetic? ? {} : values('Issue', item.source_id)
+        names.find { |name| !values[name].to_s.empty? } || names.first
+      end
+
+      # The new instance always formats its native text fields: a value that
+      # the source showed literally may render differently there. Counted per
+      # field, never rewritten.
+      def report_unformatted_natives(item)
+        (item.profile_fields || {}).each do |field, value|
+          next unless Rules::TEXT_NATIVE_FIELDS.include?(field) && value.is_a?(String) && !value.strip.empty?
+          next if native_text_formatted?(item, field)
+
+          report.add('native_field_newly_formatted', "#{item.key} #{field}", field: native_source_field(item, field),
+                                                                              item: item.key, csid: item.csid)
+        end
+      end
+
+      def text_counts
+        @text_counts
+      end
+
+      # Reports what a rendered text of the source will show differently
+      # (TextChecks): Markdown dialect, only when the source used Redcarpet,
+      # and formulas, only when it had a MathJax plugin. Run on the source
+      # text, before any rewriting.
+      def check_text(text, subject, item, dialect: true)
+        return if text.to_s.strip.empty?
+
+        where = item ? { item: item.key, csid: item.csid, project: project_identifier(item.project_id) } : {}
+        if dialect && redcarpet_source?
+          kinds = TextChecks.dialect_differences(text)
+          report.add('markdown_dialect', subject, kinds: kinds, **where) if kinds.any?
+        end
+        return unless mathjax_plugin
+
+        formulas = TextChecks.latex_formulas(text)
+        report.add('latex_formula', subject, **formulas.transform_keys(&:to_sym), plugin: mathjax_plugin, **where) if formulas.any?
+      end
+
+      # The MathJax plugin of the source, if it had one: its formulas
+      # ($...$, $$...$$...) are plain text in the new instance.
+      def mathjax_plugin
+        return @mathjax_plugin if defined?(@mathjax_plugin)
+
+        plugin = Array(source.inventory['plugins']).find { |entry| "#{entry['id']} #{entry['name']}".match?(/mathjax|latex/i) }
+        @mathjax_plugin = plugin && plugin['id']
+      end
+
+      # One entry per kind of placeholder written, after the history builder
+      # has added its own.
+      def report_text_counts!
+        @text_counts.sort.each do |kind, count|
+          if kind.start_with?('other:')
+            report.add('other_references', kind.delete_prefix('other:'), count: count)
           else
-            report.add('reference_neutralized', subject, reference: id)
-            "!##{id}"
+            report.add('text_placeholders', kind, count: count)
           end
         end
       end
 
       private
+
+      def record_text_events(subject, item, events)
+        where = item ? { item: item.key, csid: item.csid } : {}
+        events.each do |event|
+          id = event['id']
+          case event['kind']
+          when 'item', 'user', 'literal' then @text_counts[event['kind']] += 1
+          when 'other_reference' then @text_counts["other:#{event['prefix']}"] += 1
+          when 'item_neutralized' then report.add('reference_neutralized', subject, reference: id, **where)
+          when 'user_neutralized' then report.add('user_reference_neutralized', subject, reference: id, **where)
+          when 'attachment', 'issue_url'
+            @text_counts[event['kind'] == 'attachment' ? 'attachment' : 'item'] += 1
+            report.add('instance_link_rewritten', subject, kind: event['kind'] == 'attachment' ? 'attachment' : 'item',
+                                                           source_id: id, absolute: event['absolute'], form: event['form'] || 'path', **where)
+          when 'attachment_broken' then report.add('attachment_link_broken', subject, attachment: id, absolute: event['absolute'], **where)
+          when 'issue_url_broken' then report.add('item_link_broken', subject, reference: id, absolute: event['absolute'], **where)
+          when 'old_host_kept' then report.add('old_host_link_kept', subject, url: event['url'], **where)
+          when 'angle' then report.add('link_destination_bracketed', subject, destination: event['destination'], **where)
+          when 'undecided' then report.add('reference_undecided', subject, reference: id, **where)
+          when 'lookalike' then report.add('placeholder_lookalike', subject, **where)
+          end
+        end
+      end
 
       def report_source_gaps!
         source.report_rows('gaps').each do |gap|
@@ -772,7 +1083,8 @@ module SnapshotsGen
         never.each { |text| report.add('history_never_recorded', text) }
         source.content.fetch('tables').each do |table|
           name = table.fetch('name')
-          next if Rules::REDMINE_TABLES.include?(name) || Rules::COSMOSYS_TABLES.include?(name) || table.fetch('rows').zero?
+          next if Rules::REDMINE_TABLES.include?(name) || Rules::COSMOSYS_TABLES.include?(name) ||
+                  Rules::TAG_TABLES.include?(name) || table.fetch('rows').zero?
 
           report.add('plugin_data_not_migrated', name, rows: table.fetch('rows'))
         end
@@ -781,10 +1093,33 @@ module SnapshotsGen
           report.add('unsupported_content', table, rows: rows) if rows.positive?
         end
         attachments = source.table('attachments').group_by { |row| row['container_type'] }
-        %w[Project Version News Message].each do |type|
+        %w[News Message].each do |type|
           next unless attachments[type]
 
           report.add('unsupported_content', "attachments of #{type}", rows: attachments[type].length)
+        end
+        project_files.each do |id, (type, key, _index)|
+          project_id = type == 'project' ? key : @versions.fetch(key)['project_id']
+          report.add('project_file_migrated', "attachment ##{id}", project: project_identifier(project_id),
+                                                                   version: type == 'version' ? @versions.fetch(key)['name'] : nil)
+        end
+        report_attachments_without_container!
+      end
+
+      # Attachments that belong to nothing (uploads never attached: Redmine
+      # deletes them only when someone runs its cleanup) or to a record that
+      # is no longer in the source. Nothing shows them; they are not migrated.
+      def report_attachments_without_container!
+        known = { 'Issue' => @issues, 'Document' => by_id('documents'), 'WikiPage' => by_id('wiki_pages'),
+                  'Project' => @projects, 'Version' => @versions, 'News' => by_id('news'), 'Message' => by_id('messages') }
+        source.table('attachments').sort_by { |row| row['id'] }.each do |row|
+          type = row['container_type'].to_s
+          reason = if type.empty? || row['container_id'].nil? then 'no container'
+                   elsif known.key?(type) && !known[type].key?(row['container_id']) then "#{type} ##{row['container_id']} is not in the source"
+                   end
+          next unless reason
+
+          report.add('attachment_without_container', "attachment ##{row['id']}", reason: reason, filename: row['filename'])
         end
       end
     end
