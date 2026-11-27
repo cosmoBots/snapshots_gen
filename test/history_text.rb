@@ -126,6 +126,7 @@ end
             'id' => detail.id, 'property' => property, 'prop_key' => key,
             'field' => field_name, 'label' => label,
             'field_format' => field && field.field_format,
+            'text_formatting' => field && field.format_store && (field.format_store['text_formatting'] || field.format_store[:text_formatting]),
             'multiple' => !!(field && field.multiple?),
             'old_value' => detail.old_value, 'value' => detail.value,
             'display_old' => display.call(detail, label, detail.old_value),

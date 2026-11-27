@@ -366,7 +366,7 @@ module SnapshotsGen
         if (native = Rules::NATIVE_ISSUE_FIELDS[name])
           return drop(detail, item, "#{name} on an item that is not a requirement") if native['requirement'] && item.profile != 'requirement'
 
-          text = Rules::TEXT_NATIVE_FIELDS.include?(native['field'])
+          text = Rules::TEXT_NATIVE_FIELDS.include?(native['field']) && @plan.formatted_field?(name)
           mapped = lambda do |value|
             next nil if value.nil?
             next references(value, "detail ##{detail['id']}", item) if text
@@ -387,13 +387,13 @@ module SnapshotsGen
         @plan.kept_fields[field['id']] ||= field
         reference = { 'user' => 'users', 'version' => 'versions' }[field['field_format']]
         row = base.merge('prop_ref' => 'custom_fields', 'prop_key' => field['id'].to_s, 'value_ref' => reference)
-        # Text values follow the current value (Plan#rewrite_field_value);
-        # cosmoSys never touches the history, so nothing needs protecting.
-        markdown = { 'text' => @plan.markdown_source?, 'string' => false }
-        return row unless markdown.key?(field['field_format'])
+        # Text values follow the current value (Plan#rewrite_field_value):
+        # only a formatted field's links are rewritten. cosmoSys never
+        # touches the history, so nothing needs protecting.
+        return row unless @plan.formatted_field?(name)
 
         row.merge(%w[old_value value].to_h do |side|
-          [side, @plan.rewrite_text(detail[side], "detail ##{detail['id']}", item: item, markdown: markdown[field['field_format']])]
+          [side, @plan.rewrite_text(detail[side], "detail ##{detail['id']}", item: item)]
         end)
       end
 

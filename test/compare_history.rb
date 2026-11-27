@@ -289,14 +289,15 @@ module HistoryComparison
     end
 
     # Text values of a change that the converter rewrites like the current
-    # text: native text fields, and kept text and string fields.
+    # text: those of a string or text field that Redmine formatted (full
+    # formatting), kept or turned into a native text field. Any other value
+    # must arrive byte for byte.
     def text_change?(detail)
-      return false unless detail['property'] == 'cf'
+      return false unless detail['property'] == 'cf' && %w[text string].include?(detail['field_format'])
+      return false unless detail['text_formatting'].to_s == 'full'
 
       native = Rules::NATIVE_ISSUE_FIELDS[detail['field']]
-      return Rules::TEXT_NATIVE_FIELDS.include?(native['field']) if native
-
-      %w[text string].include?(detail['field_format'])
+      native ? Rules::TEXT_NATIVE_FIELDS.include?(native['field']) : true
     end
 
     def reference_evidence(old, detail, journal_id, code)
@@ -411,9 +412,8 @@ module HistoryComparison
         %w[old_value value].each { |side| result[side] = references(detail[side], "detail ##{detail['id']}", old, new, actual && actual[side]) }
         reasons << 'description links [TextLinks via HistoryBuilder#references]' if result != detail
       elsif text_change?(detail)
-        markdown = detail['field_format'] == 'text' && @markdown
         %w[old_value value].each do |side|
-          result[side] = references(detail[side], "detail ##{detail['id']}", old, new, actual && actual[side], markdown: markdown)
+          result[side] = references(detail[side], "detail ##{detail['id']}", old, new, actual && actual[side])
         end
         reasons << 'text field links [TextLinks via HistoryBuilder#translate_custom_field_detail]' if result != detail
       end

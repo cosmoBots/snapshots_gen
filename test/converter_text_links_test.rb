@@ -14,9 +14,11 @@ class ConverterTextLinksTest < Minitest::Test
   HOST = 'https://old.example.test'
   MARKDOWN = { 'text_formatting' => 'markdown' }.freeze
 
-  def custom_field(id, name, format)
+  FULL = "--- !ruby/hash:ActiveSupport::HashWithIndifferentAccess\nurl_pattern: ''\ntext_formatting: full\n"
+
+  def custom_field(id, name, format, format_store = FULL)
     { 'id' => id, 'type' => 'IssueCustomField', 'name' => name, 'field_format' => format, 'multiple' => false,
-      'is_for_all' => true, 'default_value' => nil, 'possible_values' => nil, 'format_store' => nil }
+      'is_for_all' => true, 'default_value' => nil, 'possible_values' => nil, 'format_store' => format_store }
   end
 
   # alpha (1) holds items 1 (a requirement) and 2; beta (2), another root
@@ -33,7 +35,7 @@ class ConverterTextLinksTest < Minitest::Test
     base.merge(
       'settings' => [{ 'id' => 1, 'name' => 'host_name', 'value' => 'old.example.test' },
                      { 'id' => 2, 'name' => 'protocol', 'value' => 'https' }],
-      'custom_fields' => [custom_field(5, 'rqRationale', 'text'), custom_field(6, 'Notes', 'text'), custom_field(7, 'Code', 'string')],
+      'custom_fields' => [custom_field(5, 'rqRationale', 'text'), custom_field(6, 'Notes', 'text'), custom_field(7, 'Code', 'string', "---\nurl_pattern: ''\ntext_formatting: ''\n")],
       'custom_values' => [
         { 'id' => 1, 'customized_type' => 'Issue', 'customized_id' => 1, 'custom_field_id' => 5, 'value' => 'Because of #2 and #3' },
         { 'id' => 2, 'customized_type' => 'Issue', 'customized_id' => 1, 'custom_field_id' => 6, 'value' => 'See #3 and `#2`' },
@@ -72,7 +74,9 @@ class ConverterTextLinksTest < Minitest::Test
       assert_equal 'Because of #snapshots-gen-item-2 and #snapshots-gen-item-3', item.profile_fields['rq_rationale']
       fields = item.custom_fields.to_h { |entry| [entry['name'], entry['value']] }
       assert_equal 'See #snapshots-gen-item-3 and `#snapshots-gen-hash-2`', fields['Notes']
-      assert_equal 'X #snapshots-gen-item-2', fields['Code']
+      # A string field without formatting shows its value literally: it
+      # stays as it was, only protected from cosmoSys's rewriter.
+      assert_equal 'X #snapshots-gen-hash-2', fields['Code']
       assert_equal 'About #snapshots-gen-item-3', plan.documents.fetch('document:1').description
       assert_equal 'Start at #snapshots-gen-item-1 or #snapshots-gen-item-3', plan.project_description(2)
 
@@ -103,7 +107,32 @@ class ConverterTextLinksTest < Minitest::Test
       assert_equal ['item:1', 'journal #20', 'detail #30'].sort, codes.fetch('link_destination_bracketed').map { |entry| entry['subject'] }.uniq.sort
       counts = codes.fetch('text_placeholders').to_h { |entry| [entry['subject'], entry.dig('detail', 'count')] }
       assert_operator counts.fetch('item'), :>, 5
-      assert_equal 2, counts.fetch('literal')
+      assert_equal 3, counts.fetch('literal')
+    end
+  end
+
+  # Fields that Redmine 4.2 showed literally keep their value byte for byte,
+  # in the .csys and in the history; a source field without formatting that
+  # becomes a native field is announced.
+  def test_unformatted_fields_stay_literal
+    tables = tables('x')
+    tables['custom_fields'] = [custom_field(5, 'rqRationale', 'text', nil), custom_field(6, 'Notes', 'text', nil),
+                               custom_field(7, 'Code', 'string', nil)]
+    tables['custom_values'][2]['value'] = 'Lot #1 ![](a b.png)'
+    tables['journal_details'] << { 'id' => 33, 'journal_id' => 20, 'property' => 'cf', 'prop_key' => '7',
+                                   'old_value' => 'Lot #1', 'value' => 'Lot #1 ![](a b.png)' }
+    convert(tables, settings: MARKDOWN) do |entities, report, plan|
+      item = plan.item_for_issue(1)
+      assert_equal 'Because of #2 and #3', item.profile_fields['rq_rationale']
+      fields = item.custom_fields.to_h { |entry| [entry['name'], entry['value']] }
+      # Only what cosmoSys would rewrite (#1 and #2 are of this .csys) is protected.
+      assert_equal 'See #3 and `#snapshots-gen-hash-2`', fields['Notes']
+      assert_equal 'Lot #snapshots-gen-hash-1 ![](a b.png)', fields['Code']
+      details = entities.fetch('journal_details').to_h { |row| [row['id'], row] }
+      assert_equal ['Lot #1', 'Lot #1 ![](a b.png)'], details.fetch(33).values_at('old_value', 'value')
+      assert_equal [nil, 'Because of #2 and #3'], details.fetch(31).values_at('old_value', 'value')
+      newly = report.entries.select { |entry| entry['code'] == 'native_field_newly_formatted' }
+      assert_equal ['item:1 rq_rationale'], newly.map { |entry| entry['subject'] }
     end
   end
 

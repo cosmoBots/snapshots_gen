@@ -54,6 +54,7 @@ module SnapshotsGen
         'item_link_broken' => ['warning', 'Links to items of the old instance that are not migrated: they point to no item (id 0)'],
         'old_host_link_kept' => ['warning', 'Links to the old instance that are neither an attachment nor an item, left as they are (they break when it stops)'],
         'link_destination_bracketed' => ['transformation', 'Link destinations with spaces put between < and > (Redcarpet took them, CommonMark needs the brackets)'],
+        'native_field_newly_formatted' => ['warning', 'Text fields that the source showed without formatting and that become native fields, which the new instance always formats: their Markdown and #id now render'],
         'source_host' => ['information', 'Host of the old instance (its links are rewritten)'],
         'other_references' => ['information', 'References to documents, versions, changesets or notes left as they are'],
         'ambiguous_markdown_table' => ['warning', 'Indented Markdown table headers that CommonMark shows as code'],

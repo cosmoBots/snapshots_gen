@@ -367,6 +367,17 @@ class CompareHistoryTest < Minitest::Test
     refute_empty result.unexplained
   end
 
+  # A field Redmine showed literally keeps its value byte for byte; only a
+  # formatted one has its links mapped.
+  def test_literal_field_values_must_not_change
+    before = detail('Lot', nil, 'Lot #1', property: 'cf', key: '5').merge('field_format' => 'string', 'multiple' => false)
+    after = detail('Lot', nil, 'Lot #101', property: 'cf', key: '15').merge('field_format' => 'string', 'multiple' => false)
+    refute compare_detail(before, after).ok?
+    assert compare_detail(before, before.merge('id' => 2)).ok?
+    formatted = before.merge('text_formatting' => 'full')
+    assert compare_detail(formatted, after.merge('text_formatting' => 'full')).ok?
+  end
+
   def test_kept_custom_field_cannot_silently_change_its_format
     before = detail('Example field', nil, 'text', property: 'cf')
     before['field_format'], before['multiple'] = 'text', false

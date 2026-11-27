@@ -818,10 +818,10 @@ module SnapshotsGen
           check_text(item.description, item.key, item)
           check_text(item.subject, "#{item.key} subject", item, dialect: false)
           (item.profile_fields || {}).each do |field, value|
-            check_text(value, "#{item.key} #{field}", item) if Rules::TEXT_NATIVE_FIELDS.include?(field) && value.is_a?(String)
+            check_text(value, "#{item.key} #{field}", item) if native_text_formatted?(item, field) && value.is_a?(String)
           end
           Array(item.custom_fields).each do |entry|
-            check_text(entry['value'], "#{item.key} #{entry['name']}", item) if entry['format'] == 'text' && entry['value'].is_a?(String)
+            check_text(entry['value'], "#{item.key} #{entry['name']}", item) if formatted_field?(entry['name']) && entry['value'].is_a?(String)
           end
         end
         @documents.each_value { |document| check_text(document.description, document.key, nil) }
@@ -830,12 +830,13 @@ module SnapshotsGen
           root = root_of(item.project_id)
           item.description = rewrite_text(item.description, item.key, item: item, protect_root: root)
           item.profile_fields = (item.profile_fields || {}).to_h do |field, value|
-            next [field, value] unless Rules::TEXT_NATIVE_FIELDS.include?(field) && value.is_a?(String)
+            next [field, value] unless native_text_formatted?(item, field) && value.is_a?(String)
 
             [field, rewrite_text(value, "#{item.key} #{field}", item: item)]
           end
+          report_unformatted_natives(item)
           item.custom_fields = Array(item.custom_fields).map do |entry|
-            entry.merge('value' => rewrite_field_value(entry['format'], entry['value'], "#{item.key} #{entry['name']}", item, root))
+            entry.merge('value' => rewrite_field_value(entry['name'], entry['value'], "#{item.key} #{entry['name']}", item, root))
           end
         end
         @documents.each_value do |document|
@@ -944,22 +945,57 @@ module SnapshotsGen
         result
       end
 
-      # Kept custom fields: Redmine formats only text fields; cosmoSys's
-      # rewriter takes string, text and link values. A link value is a URL:
-      # only what that rewriter would take is protected.
-      def rewrite_field_value(format, value, subject, item, root)
-        return value.map { |entry| rewrite_field_value(format, entry, subject, item, root) } if value.is_a?(Array)
+      # Kept custom fields. Redmine renders the links of a string or text
+      # field only when the field has full formatting (Redmine::FieldFormat
+      # StringFormat and TextFormat); any other value is shown literally and
+      # stays byte for byte, protected only from cosmoSys's rewriter, which
+      # takes every string, text and link value.
+      def rewrite_field_value(name, value, subject, item, root)
+        return value.map { |entry| rewrite_field_value(name, entry, subject, item, root) } if value.is_a?(Array)
         return value unless value.is_a?(String)
+        return rewrite_text(value, subject, item: item, protect_root: root) if formatted_field?(name)
 
-        case format
-        when 'text' then rewrite_text(value, subject, item: item, protect_root: root)
-        when 'string' then rewrite_text(value, subject, item: item, markdown: false, protect_root: root)
-        when 'link'
-          protect = ->(id) { (target = @items_by_source_id[id]) && root_of(target.project_id) == root }
-          result, count = TextLinks.protect_literals(value, protect)
-          @text_counts['literal'] += count
-          result
-        else value
+        protect = ->(id) { (target = @items_by_source_id[id]) && root_of(target.project_id) == root }
+        result, count = TextLinks.protect_literals(value, protect)
+        @text_counts['literal'] += count
+        result
+      end
+
+      # Whether Redmine 4.2 rendered the value of this issue custom field as
+      # formatted text (so its links were links): a string or text field
+      # with text_formatting "full".
+      def formatted_field?(name)
+        field = issue_field(name)
+        return false unless field && %w[string text].include?(field['field_format'])
+
+        Rules.yaml_hash(field['format_store'])['text_formatting'] == 'full'
+      end
+
+      # A native text field takes the formatting of the source field it
+      # comes from.
+      def native_text_formatted?(item, native_field)
+        return false unless Rules::TEXT_NATIVE_FIELDS.include?(native_field)
+
+        source = native_source_field(item, native_field)
+        source ? formatted_field?(source) : false
+      end
+
+      def native_source_field(item, native_field)
+        names = Rules::NATIVE_ISSUE_FIELDS.select { |_name, native| native['field'] == native_field }.keys
+        values = item.synthetic? ? {} : values('Issue', item.source_id)
+        names.find { |name| !values[name].to_s.empty? } || names.first
+      end
+
+      # The new instance always formats its native text fields: a value that
+      # the source showed literally may render differently there. Counted per
+      # field, never rewritten.
+      def report_unformatted_natives(item)
+        (item.profile_fields || {}).each do |field, value|
+          next unless Rules::TEXT_NATIVE_FIELDS.include?(field) && value.is_a?(String) && !value.strip.empty?
+          next if native_text_formatted?(item, field)
+
+          report.add('native_field_newly_formatted', "#{item.key} #{field}", field: native_source_field(item, field),
+                                                                              item: item.key, csid: item.csid)
         end
       end
 
